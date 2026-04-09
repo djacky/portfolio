@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install:*)",
+      "Bash(npx tsc:*)",
+      "WebSearch",
+      "WebFetch(domain:hal.science)",
+      "Bash(npx next:*)"
+    ]
+  }
+}
