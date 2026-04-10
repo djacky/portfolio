@@ -3,6 +3,7 @@
 import { motion } from "framer-motion";
 import { ArrowRight, MessageSquare } from "lucide-react";
 import dynamic from "next/dynamic";
+import NeuralConstellation from "./NeuralConstellation";
 import { useContactDrawer } from "./ContactDrawer";
 
 // Lazy-load the R3F canvas so it never blocks first paint and the
@@ -32,6 +33,11 @@ export default function Hero() {
             "radial-gradient(80% 60% at 25% 45%, rgba(5,7,13,0.85) 0%, rgba(5,7,13,0.55) 42%, rgba(5,7,13,0.1) 75%, transparent 100%)",
         }}
       />
+
+      {/* AI constellation — above vignette so particles are clearly visible */}
+      <div className="absolute inset-0 z-[2] pointer-events-none">
+        <NeuralConstellation />
+      </div>
 
       <div className="relative z-10 mx-auto max-w-6xl px-6 pt-28 pb-20 w-full pointer-events-none">
         <motion.p

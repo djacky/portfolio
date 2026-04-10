@@ -5,7 +5,12 @@
       "Bash(npx tsc:*)",
       "WebSearch",
       "WebFetch(domain:hal.science)",
-      "Bash(npx next:*)"
+      "Bash(npx next:*)",
+      "WebFetch(domain:www.awwwards.com)",
+      "WebFetch(domain:brittanychiang.com)",
+      "WebFetch(domain:dennissnellenberg.com)",
+      "Bash(npm run:*)",
+      "WebFetch(domain:daveholloway.uk)"
     ]
   }
 }

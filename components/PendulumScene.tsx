@@ -1504,6 +1504,22 @@ export default function PendulumScene() {
 
       {/* HUD — bottom-right stack */}
       <div className="absolute bottom-5 right-5 z-10 flex flex-col gap-2 items-end pointer-events-none">
+        {!trainingDone && mode === "training" && (
+          <div
+            className="flex items-center gap-3 animate-pulse"
+            style={{ marginBottom: -2 }}
+          >
+            <span
+              className="text-[#fbbf24] text-3xl drop-shadow-[0_0_12px_rgba(251,191,36,0.6)]"
+              style={{ animation: "train-me-bounce 1s ease-in-out infinite" }}
+            >
+              ←
+            </span>
+            <span className="text-lg font-bold font-mono uppercase tracking-[0.18em] text-[#fbbf24] whitespace-nowrap drop-shadow-[0_0_14px_rgba(251,191,36,0.6)]">
+              Train Me!
+            </span>
+          </div>
+        )}
         <GainsHud agentRef={agentRef} />
         <RewardSparkline returnsRef={returnsRef} />
         <NetworkViz agentRef={agentRef} />
@@ -1528,13 +1544,6 @@ export default function PendulumScene() {
         }
       `}</style>
 
-      {/* interaction hint — bottom-left */}
-      <div className="absolute bottom-5 left-5 z-10 text-[10px] font-mono uppercase tracking-[0.22em] text-gray-500 pointer-events-none max-w-[280px] leading-relaxed">
-        <div className="text-accent2 mb-1">goal · damp to rest</div>
-        {mode === "training"
-          ? "↳ uncontrolled physics — grab to disturb while the net learns"
-          : "↳ grab either ball — the learned policy will recover it"}
-      </div>
 
       {/* training-complete notification toast */}
       {showToast && (

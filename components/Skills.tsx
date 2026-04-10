@@ -1,16 +1,13 @@
 "use client";
 
 /* ------------------------------------------------------------------
-   Stack — Matter.js physics sandbox.
+   Stack — Force-directed neural-network graph.
 
-   The four capability cards are rigid bodies in a walled box. You
-   can drag them, fling them, watch them bounce. After ~2 seconds of
-   no interaction the cards smoothly settle back into a stable 2×2
-   lattice so the page still *reads* as a structured section.
-
-   Cards are rendered in the DOM (not on canvas) so all the glass,
-   gradients, and text stay crisp — Matter.js just drives the
-   position/rotation transforms each frame.
+   The four capability cards are nodes in a graph, connected by
+   spring constraints (Matter.js). Edges glow and carry activation
+   pulses when a node is dragged. The graph self-organises through
+   mutual repulsion + spring attraction + soft boundary forces.
+   Cards are DOM-rendered for crisp text; a canvas layer draws edges.
 ------------------------------------------------------------------ */
 
 import { useLayoutEffect, useRef, useState } from "react";
@@ -18,7 +15,9 @@ import { motion } from "framer-motion";
 import { Brain, Code2, Cloud, Cpu, Wrench, Move } from "lucide-react";
 import Matter from "matter-js";
 
-type Skill = { name: string; level: number; sub?: string };
+/* =================== data =================== */
+
+type Skill = { name: string; level: number };
 type Group = {
   icon: typeof Brain;
   title: string;
@@ -93,32 +92,59 @@ const TOOLS = [
   "Celery",
 ];
 
-/* ---------------- physics sandbox ---------------- */
+/* ---- graph edges ---- */
+
+type Edge = { a: number; b: number; tint: string };
+
+const EDGES: Edge[] = [
+  { a: 0, b: 3, tint: "#b08aff" }, // ML&AI <-> Systems&Control
+  { a: 1, b: 2, tint: "#2be8b0" }, // Languages <-> Backend&Cloud
+  { a: 0, b: 1, tint: "#52c4f0" }, // ML&AI <-> Languages
+  { a: 2, b: 3, tint: "#8cda62" }, // Backend&Cloud <-> Systems&Control
+  { a: 0, b: 2, tint: "#4ce0a0" }, // ML&AI <-> Backend (model serving)
+];
+
+/* =================== physics constants =================== */
 
 const CARD_W = 280;
 const CARD_H = 190;
 const SANDBOX_H = 560;
-const RETURN_DELAY = 1500;
 
-type CardMode = "idle" | "awake";
-type BodyRef = {
-  body: Matter.Body;
-  targetX: number;
-  targetY: number;
-  mode: CardMode;
-  phase: number;
-  returning: boolean;
+type Pulse = {
+  t: number;
+  speed: number;
+  direction: 1 | -1;
+  alpha: number;
 };
 
-function PhysicsSandbox() {
+type BodyRef = {
+  body: Matter.Body;
+  homeX: number;
+  homeY: number;
+  phase: number;
+  dragging: boolean;
+};
+
+type EdgeRef = {
+  constraint: Matter.Constraint;
+  a: number;
+  b: number;
+  tint: string;
+  pulses: Pulse[];
+};
+
+/* =================== component =================== */
+
+function NeuralGraph() {
   const containerRef = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
   const cardRefs = useRef<(HTMLDivElement | null)[]>([]);
-  // Compute initial lattice targets immediately so we can render cards
-  // at their final positions *before* Matter.js mounts — this guarantees
-  // something visible even if the physics engine has a hiccup.
+
   const [initialTargets] = useState(() => {
-    // Rough SSR-safe guess; real positions get written on mount.
-    const W = typeof window !== "undefined" ? Math.min(1100, window.innerWidth - 80) : 1000;
+    const W =
+      typeof window !== "undefined"
+        ? Math.min(1100, window.innerWidth - 80)
+        : 1000;
     const H = SANDBOX_H;
     const cols = W < 720 ? 1 : 2;
     const rows = Math.ceil(GROUPS.length / cols);
@@ -126,7 +152,6 @@ function PhysicsSandbox() {
     const gapY = 24;
     const totalW = cols * CARD_W + (cols - 1) * gapX;
     const totalH = rows * CARD_H + (rows - 1) * gapY;
-    // top-left corner coordinates (matches the `translate` we apply).
     const startX = (W - totalW) / 2;
     const startY = (H - totalH) / 2;
     return GROUPS.map((_, i) => {
@@ -141,89 +166,66 @@ function PhysicsSandbox() {
 
   useLayoutEffect(() => {
     const container = containerRef.current;
-    if (!container) return;
+    const canvas = canvasRef.current;
+    if (!container || !canvas) return;
 
-    const W = container.clientWidth || 1000;
+    let W = container.clientWidth || 1000;
     const H = SANDBOX_H;
 
-    // 2×2 lattice target positions (centered)
+    /* ---- canvas DPR setup ---- */
+    const dpr = Math.min(devicePixelRatio || 1, 2);
+    function sizeCanvas() {
+      canvas!.width = W * dpr;
+      canvas!.height = H * dpr;
+      edgeCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    const edgeCtx = canvas.getContext("2d")!;
+    sizeCanvas();
+
+    /* ---- lattice targets ---- */
     const cols = W < 720 ? 1 : 2;
     const rows = Math.ceil(GROUPS.length / cols);
     const gapX = 28;
     const gapY = 24;
-    const totalW = cols * CARD_W + (cols - 1) * gapX;
-    const totalH = rows * CARD_H + (rows - 1) * gapY;
-    const startX = (W - totalW) / 2 + CARD_W / 2;
-    const startY = (H - totalH) / 2 + CARD_H / 2;
 
-    const targets: { x: number; y: number }[] = GROUPS.map((_, i) => {
-      const c = i % cols;
-      const r = Math.floor(i / cols);
-      return {
-        x: startX + c * (CARD_W + gapX),
-        y: startY + r * (CARD_H + gapY),
-      };
-    });
+    function computeTargets(cw: number) {
+      const c = cw < 720 ? 1 : 2;
+      const r = Math.ceil(GROUPS.length / c);
+      const tw = c * CARD_W + (c - 1) * gapX;
+      const th = r * CARD_H + (r - 1) * gapY;
+      const sx = (cw - tw) / 2 + CARD_W / 2;
+      const sy = (H - th) / 2 + CARD_H / 2;
+      return GROUPS.map((_, i) => ({
+        x: sx + (i % c) * (CARD_W + gapX),
+        y: sy + Math.floor(i / c) * (CARD_H + gapY),
+      }));
+    }
 
-    // Engine — zero gravity, cards float by default and only move when
-    // touched or hit by another awake card.
+    const targets = computeTargets(W);
+
+    /* ---- engine (zero-gravity, no walls) ---- */
     const engine = Matter.Engine.create({
       gravity: { x: 0, y: 0 },
       enableSleeping: false,
     });
     const world = engine.world;
 
-    // Walls
-    const wallOpts: Matter.IChamferableBodyDefinition = {
-      isStatic: true,
-      render: { visible: false },
-      friction: 0.2,
-      restitution: 0.4,
-    };
-    const thickness = 200;
-    const walls = [
-      Matter.Bodies.rectangle(W / 2, -thickness / 2, W * 2, thickness, wallOpts),
-      Matter.Bodies.rectangle(
-        W / 2,
-        H + thickness / 2,
-        W * 2,
-        thickness,
-        wallOpts,
-      ),
-      Matter.Bodies.rectangle(
-        -thickness / 2,
-        H / 2,
-        thickness,
-        H * 2,
-        wallOpts,
-      ),
-      Matter.Bodies.rectangle(
-        W + thickness / 2,
-        H / 2,
-        thickness,
-        H * 2,
-        wallOpts,
-      ),
-    ];
-    Matter.World.add(world, walls);
-
-    // Card bodies — start at their lattice positions, all idle.
+    /* ---- card bodies ---- */
     const bodies: BodyRef[] = GROUPS.map((_, i) => {
       const t = targets[i];
       const body = Matter.Bodies.rectangle(t.x, t.y, CARD_W, CARD_H, {
         chamfer: { radius: 18 },
-        friction: 0.15,
-        frictionAir: 0.04,
-        restitution: 0.5,
-        density: 0.0022,
+        friction: 0.1,
+        frictionAir: 0.06,
+        restitution: 0.3,
+        density: 0.002,
       });
       return {
         body,
-        targetX: t.x,
-        targetY: t.y,
-        mode: "idle" as CardMode,
+        homeX: t.x,
+        homeY: t.y,
         phase: i * 1.7,
-        returning: false,
+        dragging: false,
       };
     });
     Matter.World.add(
@@ -231,7 +233,27 @@ function PhysicsSandbox() {
       bodies.map((b) => b.body),
     );
 
-    // Mouse drag
+    /* ---- spring constraints (edges) ---- */
+    const edgeRefs: EdgeRef[] = EDGES.map(({ a, b, tint }) => {
+      const bodyA = bodies[a].body;
+      const bodyB = bodies[b].body;
+      const dx = bodyA.position.x - bodyB.position.x;
+      const dy = bodyA.position.y - bodyB.position.y;
+      const restLength = Math.hypot(dx, dy);
+
+      const constraint = Matter.Constraint.create({
+        bodyA,
+        bodyB,
+        length: restLength,
+        stiffness: 0.004,
+        damping: 0.05,
+        render: { visible: false },
+      });
+      Matter.World.add(world, constraint);
+      return { constraint, a, b, tint, pulses: [] };
+    });
+
+    /* ---- mouse drag ---- */
     const mouse = Matter.Mouse.create(container);
     const mouseConstraint = Matter.MouseConstraint.create(engine, {
       mouse,
@@ -243,144 +265,172 @@ function PhysicsSandbox() {
     });
     Matter.World.add(world, mouseConstraint);
 
-    // --- state machine ---
-    //
-    //   idle:  pinned at lattice target each frame, rendered with a
-    //          small floating wobble. Pinning = zero velocity + setPosition
-    //          so collisions can still *register* (the event fires) but the
-    //          card doesn't drift.
-    //   awake: free physics — responds to drag, walls, and other cards.
-    //
-    // Transitions:
-    //   idle  → awake: user drags the card, OR an awake card collides with it.
-    //   awake → idle : only via the "returning" phase below.
-    //
-    // Return behavior:
-    //   On mouseleave(container), after RETURN_DELAY ms, every awake card
-    //   is marked `returning`. In the tick loop we lerp it back to its
-    //   lattice target and, once close enough, flip it back to idle.
-    //   On mouseenter, cancel any pending return and un-flag returning.
-
-    const wake = (ref: BodyRef) => {
-      ref.mode = "awake";
-      ref.returning = false;
-    };
-
+    /* ---- drag events: fire activation pulses ---- */
     Matter.Events.on(mouseConstraint, "startdrag", (e: unknown) => {
       const evt = e as { body: Matter.Body };
-      const ref = bodies.find((b) => b.body === evt.body);
-      if (ref) wake(ref);
-    });
+      const idx = bodies.findIndex((b) => b.body === evt.body);
+      if (idx < 0) return;
+      bodies[idx].dragging = true;
 
-    Matter.Events.on(engine, "collisionStart", (e: unknown) => {
-      const evt = e as { pairs: { bodyA: Matter.Body; bodyB: Matter.Body }[] };
-      for (const pair of evt.pairs) {
-        const a = bodies.find((b) => b.body === pair.bodyA);
-        const b = bodies.find((bb) => bb.body === pair.bodyB);
-        if (!a || !b) continue;
-        if (a.mode === "awake" && b.mode === "idle") wake(b);
-        else if (b.mode === "awake" && a.mode === "idle") wake(a);
+      // fire pulses along connected edges
+      for (const edge of edgeRefs) {
+        if (edge.a === idx) {
+          edge.pulses.push({ t: 0, speed: 0.018, direction: 1, alpha: 1 });
+        } else if (edge.b === idx) {
+          edge.pulses.push({ t: 1, speed: 0.018, direction: -1, alpha: 1 });
+        }
       }
     });
 
-    let returnTimer: number | null = null;
-    const onMouseEnter = () => {
-      if (returnTimer !== null) {
-        window.clearTimeout(returnTimer);
-        returnTimer = null;
-      }
-      // Do NOT clear `returning` flags here. If a card is already lerping
-      // home, let it finish — otherwise it gets stuck in "awake" mode with
-      // no velocity and no float offset (the "frozen box" bug). If the
-      // user wants to grab a returning card, `startdrag` will wake it.
-    };
-    const onMouseLeave = () => {
-      if (returnTimer !== null) window.clearTimeout(returnTimer);
-      returnTimer = window.setTimeout(() => {
-        for (const b of bodies) if (b.mode === "awake") b.returning = true;
-      }, RETURN_DELAY);
-    };
-    container.addEventListener("mouseenter", onMouseEnter);
-    container.addEventListener("mouseleave", onMouseLeave);
+    Matter.Events.on(mouseConstraint, "enddrag", (e: unknown) => {
+      const evt = e as { body: Matter.Body };
+      const idx = bodies.findIndex((b) => b.body === evt.body);
+      if (idx >= 0) bodies[idx].dragging = false;
+    });
 
-    // Runner — manual rAF so we can sync DOM in the same frame.
-    // We cap the timestep at 16.67ms so tab-switching or a single slow
-    // frame can't produce a giant integration step that lets bodies
-    // tunnel through walls. Giant flings are the main failure mode.
+    /* ---- tick loop ---- */
     const MAX_DT = 16.67;
-    const CAP_VEL = 45; // px/step — generous but bounded
     let rafId = 0;
     let last = performance.now();
+
     const tick = (now: number) => {
       const dt = Math.min(MAX_DT, now - last);
       last = now;
 
-      // Pin idle bodies to their lattice targets (collisions still fire;
-      // they just don't drift). This is what kills the hover-out flicker:
-      // idle bodies have no integration noise to amplify.
-      for (const b of bodies) {
-        if (b.mode !== "idle") continue;
-        Matter.Body.setPosition(b.body, { x: b.targetX, y: b.targetY });
-        Matter.Body.setVelocity(b.body, { x: 0, y: 0 });
-        Matter.Body.setAngle(b.body, 0);
-        Matter.Body.setAngularVelocity(b.body, 0);
-      }
+      /* -- custom forces -- */
 
-      // Returning phase: lerp awake bodies home, then flip to idle.
-      for (const b of bodies) {
-        if (!b.returning) continue;
-        if (mouseConstraint.body === b.body) continue; // user grabbed it mid-return
-        const pos = b.body.position;
-        const nx = pos.x + (b.targetX - pos.x) * 0.1;
-        const ny = pos.y + (b.targetY - pos.y) * 0.1;
-        const na = b.body.angle * 0.88;
-        Matter.Body.setPosition(b.body, { x: nx, y: ny });
-        Matter.Body.setVelocity(b.body, { x: 0, y: 0 });
-        Matter.Body.setAngle(b.body, na);
-        Matter.Body.setAngularVelocity(b.body, 0);
-        const dist = Math.hypot(b.targetX - nx, b.targetY - ny);
-        if (dist < 0.6 && Math.abs(na) < 0.012) {
-          b.mode = "idle";
-          b.returning = false;
+      // 1) Mutual repulsion (prevent overlap)
+      for (let i = 0; i < bodies.length; i++) {
+        for (let j = i + 1; j < bodies.length; j++) {
+          const a = bodies[i].body;
+          const b = bodies[j].body;
+          const dx = a.position.x - b.position.x;
+          const dy = a.position.y - b.position.y;
+          const dist = Math.max(Math.hypot(dx, dy), 1);
+          const force = 0.8 / (dist * dist);
+          const fx = (dx / dist) * force;
+          const fy = (dy / dist) * force;
+          Matter.Body.applyForce(a, a.position, { x: fx, y: fy });
+          Matter.Body.applyForce(b, b.position, { x: -fx, y: -fy });
         }
       }
 
-      // Clamp velocities before update so a fling can't tunnel a wall.
-      for (const b of bodies) {
-        if (b.mode !== "awake") continue;
-        const vx = b.body.velocity.x;
-        const vy = b.body.velocity.y;
-        const speed = Math.hypot(vx, vy);
-        if (speed > CAP_VEL) {
-          const s = CAP_VEL / speed;
-          Matter.Body.setVelocity(b.body, { x: vx * s, y: vy * s });
-        }
-      }
-
-      Matter.Engine.update(engine, dt);
-
-      // Safety net: escaped body → teleport back, zero velocity, idle.
+      // 2) Soft boundary (replaces walls)
+      const MARGIN = 60;
+      const BOUNDARY_F = 0.0004;
       for (const b of bodies) {
         const { x, y } = b.body.position;
-        const escaped =
-          !Number.isFinite(x) ||
-          !Number.isFinite(y) ||
-          x < -CARD_W ||
-          x > W + CARD_W ||
-          y < -CARD_H ||
-          y > H + CARD_H;
-        if (escaped) {
-          Matter.Body.setPosition(b.body, { x: b.targetX, y: b.targetY });
-          Matter.Body.setVelocity(b.body, { x: 0, y: 0 });
-          Matter.Body.setAngularVelocity(b.body, 0);
-          Matter.Body.setAngle(b.body, 0);
-          b.mode = "idle";
-          b.returning = false;
+        let fx = 0;
+        let fy = 0;
+        if (x < MARGIN) fx = BOUNDARY_F * (MARGIN - x);
+        if (x > W - MARGIN) fx = -BOUNDARY_F * (x - (W - MARGIN));
+        if (y < MARGIN) fy = BOUNDARY_F * (MARGIN - y);
+        if (y > H - MARGIN) fy = -BOUNDARY_F * (y - (H - MARGIN));
+        if (fx || fy)
+          Matter.Body.applyForce(b.body, b.body.position, { x: fx, y: fy });
+      }
+
+      // 3) Gentle homing (nudges graph back to centre)
+      const HOME_F = 0.000005;
+      for (const b of bodies) {
+        if (b.dragging) continue;
+        const dx = b.homeX - b.body.position.x;
+        const dy = b.homeY - b.body.position.y;
+        Matter.Body.applyForce(b.body, b.body.position, {
+          x: dx * HOME_F,
+          y: dy * HOME_F,
+        });
+      }
+
+      /* -- update pulses -- */
+      for (const edge of edgeRefs) {
+        for (let i = edge.pulses.length - 1; i >= 0; i--) {
+          const p = edge.pulses[i];
+          p.t += p.speed * p.direction;
+          // fade near the end
+          if (p.direction === 1) {
+            p.alpha = p.t > 0.7 ? 1 - (p.t - 0.7) / 0.3 : 1;
+          } else {
+            p.alpha = p.t < 0.3 ? p.t / 0.3 : 1;
+          }
+          if (p.t > 1 || p.t < 0) {
+            // cascade: fire secondary pulses at destination node
+            const destIdx = p.direction === 1 ? edge.b : edge.a;
+            for (const other of edgeRefs) {
+              if (other === edge) continue;
+              if (other.a === destIdx) {
+                other.pulses.push({
+                  t: 0,
+                  speed: 0.018,
+                  direction: 1,
+                  alpha: 0.6,
+                });
+              } else if (other.b === destIdx) {
+                other.pulses.push({
+                  t: 1,
+                  speed: 0.018,
+                  direction: -1,
+                  alpha: 0.6,
+                });
+              }
+            }
+            edge.pulses.splice(i, 1);
+          }
+        }
+        // cap pulses per edge to avoid runaway cascades
+        if (edge.pulses.length > 4) edge.pulses.length = 4;
+      }
+
+      /* -- physics step -- */
+      Matter.Engine.update(engine, dt);
+
+      /* -- draw edges on canvas -- */
+      edgeCtx.clearRect(0, 0, W, H);
+
+      for (const edge of edgeRefs) {
+        const posA = bodies[edge.a].body.position;
+        const posB = bodies[edge.b].body.position;
+
+        // base edge glow
+        edgeCtx.save();
+        edgeCtx.strokeStyle = edge.tint;
+        edgeCtx.globalAlpha = 0.2;
+        edgeCtx.lineWidth = 2;
+        edgeCtx.shadowColor = edge.tint;
+        edgeCtx.shadowBlur = 14;
+        edgeCtx.beginPath();
+        edgeCtx.moveTo(posA.x, posA.y);
+        edgeCtx.lineTo(posB.x, posB.y);
+        edgeCtx.stroke();
+
+        // bright core
+        edgeCtx.globalAlpha = 0.45;
+        edgeCtx.lineWidth = 1;
+        edgeCtx.shadowBlur = 6;
+        edgeCtx.stroke();
+        edgeCtx.restore();
+
+        // draw pulses
+        for (const pulse of edge.pulses) {
+          const px = posA.x + (posB.x - posA.x) * pulse.t;
+          const py = posA.y + (posB.y - posA.y) * pulse.t;
+          const r = 7;
+          const grad = edgeCtx.createRadialGradient(px, py, 0, px, py, r);
+          grad.addColorStop(0, edge.tint);
+          grad.addColorStop(1, "transparent");
+          edgeCtx.save();
+          edgeCtx.globalAlpha = pulse.alpha * 0.9;
+          edgeCtx.shadowColor = edge.tint;
+          edgeCtx.shadowBlur = 18;
+          edgeCtx.fillStyle = grad;
+          edgeCtx.beginPath();
+          edgeCtx.arc(px, py, r, 0, Math.PI * 2);
+          edgeCtx.fill();
+          edgeCtx.restore();
         }
       }
 
-      // Sync DOM transforms — idle cards get a subtle floating wobble
-      // so the lattice feels alive even while nothing is happening.
+      /* -- sync DOM transforms -- */
       const tSec = now * 0.001;
       bodies.forEach((b, i) => {
         const el = cardRefs.current[i];
@@ -388,11 +438,14 @@ function PhysicsSandbox() {
         let x = b.body.position.x;
         let y = b.body.position.y;
         let angle = b.body.angle;
-        if (b.mode === "idle") {
-          x += Math.cos(tSec * 0.6 + b.phase) * 2.5;
-          y += Math.sin(tSec * 0.75 + b.phase) * 3;
-          angle += Math.sin(tSec * 0.5 + b.phase) * 0.012;
-        }
+
+        // subtle breathing that fades during motion
+        const speed = Math.hypot(b.body.velocity.x, b.body.velocity.y);
+        const breathe = Math.max(0, 1 - speed / 2);
+        x += Math.cos(tSec * 0.6 + b.phase) * 2.5 * breathe;
+        y += Math.sin(tSec * 0.75 + b.phase) * 3 * breathe;
+        angle += Math.sin(tSec * 0.5 + b.phase) * 0.012 * breathe;
+
         el.style.transform = `translate(${x - CARD_W / 2}px, ${
           y - CARD_H / 2
         }px) rotate(${angle}rad)`;
@@ -402,7 +455,7 @@ function PhysicsSandbox() {
     };
     rafId = requestAnimationFrame(tick);
 
-    // Force an immediate sync so cards are visible on the very first paint.
+    // First-paint sync
     bodies.forEach((b, i) => {
       const el = cardRefs.current[i];
       if (!el) return;
@@ -412,23 +465,18 @@ function PhysicsSandbox() {
       el.style.opacity = "1";
     });
 
-    // Resize — simple reset to new targets on container width change
+    /* ---- resize ---- */
     let lastW = W;
     const ro = new ResizeObserver(() => {
       const newW = container.clientWidth;
       if (Math.abs(newW - lastW) < 4) return;
       lastW = newW;
-      const newCols = newW < 720 ? 1 : 2;
-      const newRows = Math.ceil(GROUPS.length / newCols);
-      const tw = newCols * CARD_W + (newCols - 1) * gapX;
-      const th = newRows * CARD_H + (newRows - 1) * gapY;
-      const sx = (newW - tw) / 2 + CARD_W / 2;
-      const sy = (H - th) / 2 + CARD_H / 2;
+      W = newW;
+      sizeCanvas();
+      const newTargets = computeTargets(newW);
       bodies.forEach((b, i) => {
-        const c = i % newCols;
-        const r = Math.floor(i / newCols);
-        b.targetX = sx + c * (CARD_W + gapX);
-        b.targetY = sy + r * (CARD_H + gapY);
+        b.homeX = newTargets[i].x;
+        b.homeY = newTargets[i].y;
       });
     });
     ro.observe(container);
@@ -436,9 +484,6 @@ function PhysicsSandbox() {
     return () => {
       cancelAnimationFrame(rafId);
       ro.disconnect();
-      if (returnTimer !== null) window.clearTimeout(returnTimer);
-      container.removeEventListener("mouseenter", onMouseEnter);
-      container.removeEventListener("mouseleave", onMouseLeave);
       Matter.World.clear(world, false);
       Matter.Engine.clear(engine);
     };
@@ -447,30 +492,24 @@ function PhysicsSandbox() {
   return (
     <div
       ref={containerRef}
-      className="relative w-full rounded-3xl border border-white/10 bg-gradient-to-b from-black/30 to-black/50 overflow-hidden cursor-grab active:cursor-grabbing"
+      className="relative w-full overflow-hidden cursor-grab active:cursor-grabbing"
       style={{
         height: SANDBOX_H,
-        // Isolate this subtree from outer layout / paint — prevents the
-        // floating cards' subpixel transforms from ever leaking into
-        // document-level paint and causing the page to appear to shift.
         contain: "layout paint style",
         touchAction: "none",
       }}
     >
-      {/* subtle grid floor */}
-      <div
-        className="absolute inset-0 pointer-events-none opacity-[0.06]"
-        style={{
-          backgroundImage:
-            "linear-gradient(rgba(255,255,255,0.5) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.5) 1px, transparent 1px)",
-          backgroundSize: "40px 40px",
-        }}
+      {/* edge canvas */}
+      <canvas
+        ref={canvasRef}
+        className="absolute inset-0 w-full h-full pointer-events-none"
+        style={{ zIndex: 1 }}
       />
 
       {/* drag hint */}
-      <div className="absolute top-4 left-4 inline-flex items-center gap-2 text-[10px] font-mono uppercase tracking-[0.2em] text-gray-500 pointer-events-none">
+      <div className="absolute top-4 left-4 z-10 inline-flex items-center gap-2 text-[10px] font-mono uppercase tracking-[0.2em] text-gray-500 pointer-events-none">
         <Move className="w-3 h-3" />
-        drag · fling · let go
+        drag a node · watch the network respond
       </div>
 
       {GROUPS.map((g, i) => {
@@ -488,8 +527,7 @@ function PhysicsSandbox() {
               height: CARD_H,
               transformOrigin: "center center",
               willChange: "transform",
-              // Render at target position immediately — Matter.js will
-              // overwrite this on the next frame.
+              zIndex: 2,
               transform: `translate(${t.x}px, ${t.y}px)`,
             }}
           >
@@ -552,7 +590,7 @@ function PhysicsSandbox() {
   );
 }
 
-/* ---------------- section ---------------- */
+/* =================== section =================== */
 
 export default function Skills() {
   return (
@@ -565,8 +603,8 @@ export default function Skills() {
           The tools I reach for.
         </h2>
         <p className="mt-3 max-w-2xl text-sm text-gray-400">
-          Four capability pillars. Grab a card, fling it, let it settle — the
-          lattice re-forms on its own.
+          Four capability pillars, connected. Drag a node and watch the network
+          respond.
         </p>
       </header>
 
@@ -576,7 +614,7 @@ export default function Skills() {
         viewport={{ once: true, margin: "-80px" }}
         transition={{ duration: 0.6 }}
       >
-        <PhysicsSandbox />
+        <NeuralGraph />
       </motion.div>
 
       {/* tooling strip */}

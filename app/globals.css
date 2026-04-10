@@ -61,6 +61,19 @@ body {
   pointer-events: none;
 }
 
+/* neural-net edge flow */
+@keyframes dash-flow {
+  to { stroke-dashoffset: -20; }
+}
+.edge-career { animation: dash-flow 3s linear infinite; }
+.edge-neural { animation: dash-flow 5s linear infinite; }
+
+/* "Train Me!" bouncing arrow (horizontal, pointing left) */
+@keyframes train-me-bounce {
+  0%, 100% { transform: translateX(0); }
+  50% { transform: translateX(-5px); }
+}
+
 /* custom scrollbar */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: #05070d; }
