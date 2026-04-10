@@ -123,7 +123,7 @@ export default function Hero() {
           transition={{ delay: 1.2, duration: 1.2 }}
           className="mt-16 text-[10px] font-mono uppercase tracking-[0.25em] text-gray-600"
         >
-          ↳ grab the pendulum — the policy is learning
+          ↳ grab the pendulum — teach it to swing up
         </motion.p>
       </div>
     </section>

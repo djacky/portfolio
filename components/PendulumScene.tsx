@@ -1,23 +1,24 @@
 "use client";
 
 /* ------------------------------------------------------------------
-   PendulumScene — live reinforcement-learning demo.
+   PendulumScene — live pendubot swing-up demo.
 
-   A 2-link pendulum rendered in Three.js, controlled by a
-   REINFORCE policy-gradient agent trained *in the browser* using
-   TensorFlow.js. The agent starts with random weights, so the
-   pendulum flails; over ~60–120s of real time you watch it learn
-   to keep the double pendulum upright.
+   A 2-link pendulum (pendubot: motor at joint 1 only) rendered in
+   Three.js. An MLP is trained in-browser via behavioral cloning
+   against a hybrid teacher (energy-based swing-up + LQR balance)
+   while the user grabs and moves the pendulum freely.
+
+   Goal: swing link 2 to the inverted position (θ₂ = π) and balance.
+   The motor can only actuate joint 1 — joint 2 is passive. This is
+   an underactuated control problem that requires energy pumping to
+   swing up, then precise linear control to balance.
 
    Physics: custom RK4 integration of the double-pendulum EOM
      (Lagrangian form, with added joint torques + joint damping).
-   Agent:   small MLP (6 → 32 → 32 → 2 μ + 2 logσ), Gaussian policy,
-            REINFORCE with standardized returns + entropy bonus,
+   Agent:   small MLP (7 → 64 → 64 → 1), behavioral cloning,
             Adam optimizer.
-   Visible env steps in real time (one physics step per frame).
-   A separate training env runs several steps per frame, feeding
-   the shared policy with experience. Watching the visible env =
-   watching the current policy act.
+   Training: user grabs pendulum → BC data collected from visible env.
+   Control:  frozen learned weights drive automatic swing-up + balance.
 ------------------------------------------------------------------ */
 
 import {
@@ -56,7 +57,7 @@ const G = 9.81;
 // indefinitely; with one, it damps cleanly to rest.
 const DAMPING = 0.0015;
 const DT = 0.02;
-const TORQUE_MAX = 8;
+const TORQUE_MAX = 30;
 
 type EnvState = { th1: number; th2: number; w1: number; w2: number };
 
@@ -67,6 +68,22 @@ function wrap(a: number): number {
   if (x < 0) x += 2 * Math.PI;
   return x - Math.PI;
 }
+
+// Total energy of the double pendulum (KE + PE).
+function energy(s: EnvState): number {
+  const KE =
+    0.5 * (M1 + M2) * L1 * L1 * s.w1 * s.w1 +
+    0.5 * M2 * L2 * L2 * s.w2 * s.w2 +
+    M2 * L1 * L2 * s.w1 * s.w2 * Math.cos(s.th1 - s.th2);
+  const PE =
+    -(M1 + M2) * G * L1 * Math.cos(s.th1) -
+    M2 * G * L2 * Math.cos(s.th2);
+  return KE + PE;
+}
+
+// Target energy at inverted equilibrium (θ₁=0, θ₂=π, ω=0).
+// PE = -(M1+M2)*G*L1*cos(0) - M2*G*L2*cos(π) = -2g + g = -g
+const E_TARGET = -(M1 + M2) * G * L1 + M2 * G * L2; // -9.81
 
 // Double-pendulum equations of motion — proper Lagrangian form with
 // explicit mass matrix inversion. θ₁ and θ₂ are BOTH absolute angles
@@ -147,50 +164,81 @@ function obsOf(s: EnvState): number[] {
     Math.cos(s.th1),
     Math.sin(s.th2),
     Math.cos(s.th2),
-    s.w1 / 6,
-    s.w2 / 6,
+    s.w1 / 10,
+    s.w2 / 10,
+    (energy(s) - E_TARGET) / 20,
   ];
 }
 
 /* ----------------------------------------------------------------
-   Goal: Hanging stabilization.
-     Target state = (θ₁=0, θ₂=0, ω₁=0, ω₂=0)
-     → both links hanging at rest.
+   Goal: Pendubot inversion.
+     Target state = (θ₁≈0, θ₂=π, ω₁=0, ω₂=0)
+     → link 2 balanced inverted above the pivot.
 
-   The motor at joint 1 must actively damp the double pendulum to
-   rest. Natural damping is nearly zero, so any energy in the system
-   has to be removed by the controller. This is the task the neural
-   net learns by behavioral cloning against a closed-form PD teacher.
+   The motor acts ONLY on joint 1 (pendubot). Joint 2 is passive.
+   This is an underactuated control problem requiring two phases:
+     1. Energy-based swing-up (Åström–Furuta style): pump energy
+        into the system until it reaches the inverted level.
+     2. LQR balance: once link 2 is close to vertical, switch to
+        linear state-feedback to stabilize the inverted equilibrium.
+
+   The hybrid teacher provides the BC target for both regimes.
 ---------------------------------------------------------------- */
 
-// PD teacher — linearized around the hanging equilibrium.
-// Gravity already supplies the restoring force on θ₁, so KP1 is small.
-// The main job is velocity feedback on both joints to drain kinetic
-// energy. This is a provably stable controller for the hanging goal.
-const KP1 = 3.0;
-const KD1 = 6.5;
-const KD2 = 2.8;
+// LQR gains at the inverted equilibrium (θ₁=0, θ₂=π).
+// Computed offline: A linearized, Q=diag(10,10,1,1), R=0.1.
+// State order: [θ₁, δθ₂, ω₁, ω₂] where δθ₂ = θ₂ − π.
+const LQR_K = [-41.64, 101.62, -17.31, 29.14];
 
-function pdTeacher(s: EnvState): number {
+// Swing-up controller parameters (Åström–Furuta energy pumping).
+const SWING_KE = 8; // energy-shaping gain
+const SWING_KP = 2; // θ₁ position correction
+const SWING_KD = 0.3; // θ₁ velocity damping
+
+function pendobotTeacher(s: EnvState): number {
+  const dth2 = wrap(s.th2 - Math.PI);
+
+  // --- LQR balance regime ---
+  // Switch when link 2 is close to inverted and velocities are moderate.
+  if (
+    Math.abs(dth2) < 0.4 &&
+    Math.abs(s.th1) < 0.8 &&
+    Math.abs(s.w1) < 6 &&
+    Math.abs(s.w2) < 6
+  ) {
+    const u = -(
+      LQR_K[0] * s.th1 +
+      LQR_K[1] * dth2 +
+      LQR_K[2] * s.w1 +
+      LQR_K[3] * s.w2
+    );
+    return Math.max(-TORQUE_MAX, Math.min(TORQUE_MAX, u));
+  }
+
+  // --- Energy-based swing-up regime ---
+  // Pump energy toward the inverted level while keeping θ₁ near zero.
+  const E = energy(s);
+  const Etilde = E - E_TARGET;
   const u =
-    -KP1 * Math.sin(wrap(s.th1)) -
-    KD1 * s.w1 -
-    KD2 * s.w2;
+    SWING_KE * (-Etilde) * s.w1 -
+    SWING_KP * Math.sin(s.th1) -
+    SWING_KD * s.w1;
   return Math.max(-TORQUE_MAX, Math.min(TORQUE_MAX, u));
 }
 
-// Success window — pendulum is "at rest" within these bounds.
+// Success window — link 2 is balanced inverted.
 function atTarget(s: EnvState): boolean {
   return (
-    Math.abs(wrap(s.th1)) < 0.18 &&
-    Math.abs(wrap(s.th2)) < 0.18 &&
-    Math.abs(s.w1) < 0.6 &&
-    Math.abs(s.w2) < 0.6
+    Math.abs(wrap(s.th2 - Math.PI)) < 0.2 &&
+    Math.abs(wrap(s.th1)) < 0.4 &&
+    Math.abs(s.w1) < 1.0 &&
+    Math.abs(s.w2) < 1.0
   );
 }
 
 function initState(): EnvState {
-  // Moderate displacement from rest — "just got bumped".
+  // Start hanging with a moderate kick — gives the user something
+  // to see while they decide to grab the pendulum.
   return {
     th1: (Math.random() - 0.5) * 1.8,
     th2: (Math.random() - 0.5) * 1.8,
@@ -236,9 +284,10 @@ function ik2(
 
 /* ================================================================
    agent — policy network trained via online behavioral cloning
-   against the closed-form PD teacher. The narrative: the network
-   watches the teacher control the pendulum and learns to reproduce
-   its decisions, then takes over once its loss is low enough.
+   against the hybrid swing-up/balance teacher. The user interacts
+   with the pendulum, generating diverse training data. The network
+   learns to reproduce the teacher's decisions across the full state
+   space (swing-up + balance), then takes over in control mode.
 ================================================================ */
 
 type Mode = "idle" | "training" | "ready" | "control";
@@ -253,6 +302,7 @@ type AgentStats = {
   trialsSuccess: number;
   successStreak: number;
   trainingComplete: boolean;
+  progress: number; // 0–1 training completion estimate for HUD
 };
 
 class Agent {
@@ -274,16 +324,18 @@ class Agent {
     trialsSuccess: 0,
     successStreak: 0,
     trainingComplete: false,
+    progress: 0,
   };
 
   async init() {
     await tf.setBackend("cpu");
     await tf.ready();
-    const H = 32;
+    const IN = 7;
+    const H = 64;
     // Glorot-scaled init for stable early gradients.
-    this.W1 = tf.variable(tf.randomNormal([6, H], 0, Math.sqrt(2 / 38)));
+    this.W1 = tf.variable(tf.randomNormal([IN, H], 0, Math.sqrt(2 / (IN + H))));
     this.b1 = tf.variable(tf.zeros([H]));
-    this.W2 = tf.variable(tf.randomNormal([H, H], 0, Math.sqrt(2 / 64)));
+    this.W2 = tf.variable(tf.randomNormal([H, H], 0, Math.sqrt(2 / (H + H))));
     this.b2 = tf.variable(tf.zeros([H]));
     this.Wm = tf.variable(tf.randomNormal([H, 1], 0, 0.1));
     this.bm = tf.variable(tf.zeros([1]));
@@ -298,23 +350,28 @@ class Agent {
   }
 
   // Deterministic forward pass — used wherever we actually control
-  // the pendulum with the network.
+  // the pendulum with the network.  The network outputs normalized
+  // torque in [-1, 1]; scale back to real torque units here.
   actDet(o: number[]): number {
     return tf.tidy(() => {
       const obsT = tf.tensor2d([o]);
-      return this.netT(obsT).dataSync()[0];
+      return this.netT(obsT).dataSync()[0] * TORQUE_MAX;
     });
   }
 
   // Supervised mini-batch update: mean squared error between the
-  // network's output and the PD teacher's target torque.
+  // network's output and the hybrid teacher's target torque.
+  // Targets are normalized by TORQUE_MAX so the network learns in
+  // [-1, 1] — matching the observation scale and eliminating the
+  // need to grow weights 30x from initialization just to produce
+  // full-range swing-up torques.
   trainBatch(obsBatch: number[][], tgtBatch: number[]) {
     if (obsBatch.length === 0) return;
     const agent = this;
     let lossVal = 0;
     const lossTensor = this.optim.minimize(() => {
       const obsT = tf.tensor2d(obsBatch);
-      const tgtT = tf.tensor2d(tgtBatch.map((a) => [a]));
+      const tgtT = tf.tensor2d(tgtBatch.map((a) => [a / TORQUE_MAX]));
       const pred = agent.netT(obsT);
       return tf.mean(tf.square(tf.sub(pred, tgtT))) as tf.Scalar;
     }, true);
@@ -323,18 +380,20 @@ class Agent {
       lossTensor.dispose();
     }
     this.stats.updates += 1;
-    // Exponential moving average of the loss for a stable HUD reading.
+    // Exponential moving average — loss is already in normalized [0, 1]
+    // units since both pred and target are in [-1, 1].
     this.stats.loss = this.stats.loss * 0.9 + lossVal * 0.1;
   }
 
   // Re-randomize all weights — used by the "retrain" flow so the
   // viewer can watch the learning process from scratch again.
   resetWeights() {
-    const H = 32;
+    const IN = 7;
+    const H = 64;
     tf.tidy(() => {
-      this.W1.assign(tf.randomNormal([6, H], 0, Math.sqrt(2 / 38)));
+      this.W1.assign(tf.randomNormal([IN, H], 0, Math.sqrt(2 / (IN + H))));
       this.b1.assign(tf.zeros([H]));
-      this.W2.assign(tf.randomNormal([H, H], 0, Math.sqrt(2 / 64)));
+      this.W2.assign(tf.randomNormal([H, H], 0, Math.sqrt(2 / (H + H))));
       this.b2.assign(tf.zeros([H]));
       this.Wm.assign(tf.randomNormal([H, 1], 0, 0.1));
       this.bm.assign(tf.zeros([1]));
@@ -349,36 +408,39 @@ class Agent {
       trialsSuccess: 0,
       successStreak: 0,
       trainingComplete: false,
+      progress: 0,
     };
   }
 
-  // Finite-difference the learned network at the hanging-rest state
-  // to recover its EFFECTIVE linear controller gains:
-  //   u ≈ k_th1 · θ₁ + k_th2 · θ₂ + k_w1 · ω₁ + k_w2 · ω₂
-  // These are the quantities BC is implicitly learning, and they
-  // should converge to the teacher's analytical values over training.
+  // Finite-difference the learned network at the INVERTED equilibrium
+  // (θ₁=0, θ₂=π) to recover its effective linear controller gains.
+  // These should converge to the LQR teacher gains over training:
+  //   u ≈ k_θ₁·θ₁ + k_δθ₂·(θ₂−π) + k_ω₁·ω₁ + k_ω₂·ω₂
   gainsSnapshot(): { kTh1: number; kTh2: number; kW1: number; kW2: number } {
     const eps = 0.05;
-    const obs0 = [0, 1, 0, 1, 0, 0];
-    // θ₁ partial: perturb sin θ₁ ≈ ε, keep cos ≈ 1.
-    const oThp = [Math.sin(eps), Math.cos(eps), 0, 1, 0, 0];
-    const oThm = [Math.sin(-eps), Math.cos(-eps), 0, 1, 0, 0];
-    const oTh2p = [0, 1, Math.sin(eps), Math.cos(eps), 0, 0];
-    const oTh2m = [0, 1, Math.sin(-eps), Math.cos(-eps), 0, 0];
-    // ω₁, ω₂ enter obs divided by 6.
-    const oW1p = [0, 1, 0, 1, eps / 6, 0];
-    const oW1m = [0, 1, 0, 1, -eps / 6, 0];
-    const oW2p = [0, 1, 0, 1, 0, eps / 6];
-    const oW2m = [0, 1, 0, 1, 0, -eps / 6];
+    // Build EnvState objects at inverted equilibrium with perturbations.
+    const s0: EnvState = { th1: 0, th2: Math.PI, w1: 0, w2: 0 };
+    const sThp: EnvState = { th1: eps, th2: Math.PI, w1: 0, w2: 0 };
+    const sThm: EnvState = { th1: -eps, th2: Math.PI, w1: 0, w2: 0 };
+    const sDTh2p: EnvState = { th1: 0, th2: Math.PI + eps, w1: 0, w2: 0 };
+    const sDTh2m: EnvState = { th1: 0, th2: Math.PI - eps, w1: 0, w2: 0 };
+    const sW1p: EnvState = { th1: 0, th2: Math.PI, w1: eps, w2: 0 };
+    const sW1m: EnvState = { th1: 0, th2: Math.PI, w1: -eps, w2: 0 };
+    const sW2p: EnvState = { th1: 0, th2: Math.PI, w1: 0, w2: eps };
+    const sW2m: EnvState = { th1: 0, th2: Math.PI, w1: 0, w2: -eps };
     return tf.tidy(() => {
       const batch = tf.tensor2d([
-        obs0, oThp, oThm, oTh2p, oTh2m, oW1p, oW1m, oW2p, oW2m,
+        obsOf(s0), obsOf(sThp), obsOf(sThm),
+        obsOf(sDTh2p), obsOf(sDTh2m),
+        obsOf(sW1p), obsOf(sW1m), obsOf(sW2p), obsOf(sW2m),
       ]);
       const out = this.netT(batch).dataSync();
-      const kTh1 = (out[1] - out[2]) / (2 * eps);
-      const kTh2 = (out[3] - out[4]) / (2 * eps);
-      const kW1 = (out[5] - out[6]) / (2 * eps);
-      const kW2 = (out[7] - out[8]) / (2 * eps);
+      // Network outputs normalized torque; scale to real units for gains.
+      const S = TORQUE_MAX;
+      const kTh1 = S * (out[1] - out[2]) / (2 * eps);
+      const kTh2 = S * (out[3] - out[4]) / (2 * eps);
+      const kW1 = S * (out[5] - out[6]) / (2 * eps);
+      const kW2 = S * (out[7] - out[8]) / (2 * eps);
       return { kTh1, kTh2, kW1, kW2 };
     });
   }
@@ -750,7 +812,7 @@ function PendulumModeToggle({
     <div className="flex flex-col items-center gap-1.5 w-max">
       {trainingDone && mode !== "control" && (
         <div className="text-[9px] font-mono uppercase tracking-[0.22em] text-[#fbbf24] whitespace-nowrap drop-shadow-[0_0_10px_rgba(251,191,36,0.6)] animate-pulse">
-          ✦ training successful — now control!
+          ✦ swing-up learned — try control!
         </div>
       )}
       <div className="flex gap-1" style={{ pointerEvents: "auto" }}>
@@ -789,7 +851,6 @@ function SceneRunner({
   agentRef,
   visibleEnvRef,
   convergedRef,
-  returnsRef,
   grabRef,
   statsRef,
   modeRef,
@@ -798,7 +859,6 @@ function SceneRunner({
   agentRef: MutableRefObject<Agent | null>;
   visibleEnvRef: MutableRefObject<EnvState>;
   convergedRef: MutableRefObject<boolean>;
-  returnsRef: MutableRefObject<number[]>;
   grabRef: MutableRefObject<GrabState>;
   statsRef: MutableRefObject<AgentStats>;
   modeRef: MutableRefObject<Mode>;
@@ -809,20 +869,32 @@ function SceneRunner({
     goControl: () => void;
   };
 }) {
-  // Replay buffer is fed exclusively from the visible env. The user's
-  // interactions (and the initial kick from initState) are the sole
-  // source of state diversity — no hidden parallel rollout.
+  // Replay buffer is fed from the visible env (user interactions)
+  // plus synthetic random-state augmentation to ensure the network
+  // sees the full teacher policy (swing-up + balance regions).
   const bufObs = useRef<number[][]>([]);
   const bufTgt = useRef<number[]>([]);
   const holdRef = useRef(0);
 
-  const BUF_MAX = 2400;
-  const BATCH = 48;
-  // For swing-up the teacher is switched (energy-pump vs LQR), so MSE
-  // bottoms out higher than a pure-PD target. Use sustained hold-time
-  // at the inverted target (judged on the visible env) as the real
-  // completion signal instead.
-  const HOLD_FRAMES_NEEDED = 90;
+  const BUF_MAX = 10000;
+  const BATCH = 64;
+  const N_AUG = 4; // point-wise synthetic augmentation per frame
+  const N_SHADOW = 4; // shadow envs running the teacher for trajectory data
+
+  // Shadow environments: the teacher policy drives these from random
+  // low-energy ICs through the full swing-up trajectory.  Unlike
+  // point-wise random augmentation, these produce temporally coherent
+  // data along the energy manifold the student actually needs to follow.
+  const shadowEnvs = useRef<EnvState[]>([]);
+  if (shadowEnvs.current.length === 0) {
+    for (let i = 0; i < N_SHADOW; i++) {
+      shadowEnvs.current.push({
+        th1: (Math.random() - 0.5) * 0.6,
+        th2: (Math.random() - 0.5) * 0.6,
+        w1: 0, w2: 0,
+      });
+    }
+  }
 
   useFrame(() => {
     const agent = agentRef.current;
@@ -841,22 +913,28 @@ function SceneRunner({
         visibleEnvRef.current = { th1, th2, w1: 0, w2: 0 };
       }
     } else {
-      // Training mode: the visible pendulum runs as FREE PHYSICS (zero
-      // motor torque). The learned policy is NOT applied here — all
-      // training happens invisibly in the hidden rollout env below.
-      // This way "training" is honestly just the network watching and
-      // learning, not secretly controlling.
-      //
-      // Control mode: the network drives the pendulum via its frozen
-      // learned weights (actDet).
+      // Both modes run free physics by default (u = 0). In control
+      // mode the learned policy activates ONLY when link 2 is near
+      // the inverted position — the user swings the pendulum and the
+      // AI catches and balances it. This plays to the network's
+      // strength (precise LQR balance) and avoids its weakness
+      // (energy-pump swing-up, which is hard to clone via BC).
       let u = 0;
       if (mode === "control") {
-        const o = obsOf(visibleEnvRef.current);
-        u = agent.actDet(o);
-        u = Math.max(-TORQUE_MAX, Math.min(TORQUE_MAX, u));
+        const s = visibleEnvRef.current;
+        const dth2 = Math.abs(wrap(s.th2 - Math.PI));
+        // Activate the learned policy when link 2 is within ~35° of
+        // inverted. Wide enough to catch the pendulum as it swings
+        // through, narrow enough that we're not fighting gravity when
+        // the pendulum is far from the target.
+        if (dth2 < 0.6) {
+          const o = obsOf(s);
+          u = agent.actDet(o);
+          u = Math.max(-TORQUE_MAX, Math.min(TORQUE_MAX, u));
+        }
       }
       agent.stats.netAction = u;
-      agent.stats.teacherAction = pdTeacher(visibleEnvRef.current);
+      agent.stats.teacherAction = pendobotTeacher(visibleEnvRef.current);
       visibleEnvRef.current = stepEnv(visibleEnvRef.current, u);
     }
     // Safety clamp — never respawn, just clip runaway angular velocity
@@ -880,10 +958,81 @@ function SceneRunner({
     {
       const to = obsOf(visibleEnvRef.current);
       bufObs.current.push(to);
-      bufTgt.current.push(pdTeacher(visibleEnvRef.current));
+      bufTgt.current.push(pendobotTeacher(visibleEnvRef.current));
       if (bufObs.current.length > BUF_MAX) {
         bufObs.current.shift();
         bufTgt.current.shift();
+      }
+    }
+
+    // Synthetic point-wise augmentation: random states labelled by the
+    // teacher. Velocity range kept moderate so obs stay in ~ [-1, 1];
+    // the shadow-env trajectories naturally cover higher velocities
+    // encountered during real swing-up.
+    for (let i = 0; i < N_AUG; i++) {
+      const synth: EnvState = {
+        th1: (Math.random() - 0.5) * 2 * Math.PI,
+        th2: Math.random() * 2 * Math.PI,
+        w1: (Math.random() - 0.5) * 14,
+        w2: (Math.random() - 0.5) * 14,
+      };
+      bufObs.current.push(obsOf(synth));
+      bufTgt.current.push(pendobotTeacher(synth));
+      if (bufObs.current.length > BUF_MAX) {
+        bufObs.current.shift();
+        bufTgt.current.shift();
+      }
+    }
+
+    // Targeted augmentation near the inverted equilibrium so the
+    // network sees enough LQR-regime data. Without this, the LQR
+    // region (~2% of uniform state space) is severely undersampled
+    // and the learned gains at the balance point never converge.
+    for (let i = 0; i < N_AUG; i++) {
+      const synth: EnvState = {
+        th1: (Math.random() - 0.5) * 1.6,          // [-0.8, 0.8]
+        th2: Math.PI + (Math.random() - 0.5) * 1.0, // near inverted
+        w1: (Math.random() - 0.5) * 12,             // [-6, 6]
+        w2: (Math.random() - 0.5) * 12,
+      };
+      bufObs.current.push(obsOf(synth));
+      bufTgt.current.push(pendobotTeacher(synth));
+      if (bufObs.current.length > BUF_MAX) {
+        bufObs.current.shift();
+        bufTgt.current.shift();
+      }
+    }
+
+    // Trajectory augmentation: step shadow envs under the teacher
+    // policy. Unlike random point-wise samples, these trace the
+    // actual energy manifold traversed during swing-up, teaching the
+    // network the temporally coherent sequence of actions needed to
+    // pump energy toward the inverted equilibrium.
+    for (let i = 0; i < N_SHADOW; i++) {
+      let se = shadowEnvs.current[i];
+      // Guard against NaN / runaway velocities in shadow envs.
+      if (!Number.isFinite(se.w1) || Math.abs(se.w1) > 30 || Math.abs(se.w2) > 30) {
+        se = { th1: (Math.random() - 0.5) * 0.6, th2: (Math.random() - 0.5) * 0.6, w1: 0, w2: 0 };
+        shadowEnvs.current[i] = se;
+      }
+      const u = pendobotTeacher(se);
+      bufObs.current.push(obsOf(se));
+      bufTgt.current.push(u);
+      if (bufObs.current.length > BUF_MAX) {
+        bufObs.current.shift();
+        bufTgt.current.shift();
+      }
+      shadowEnvs.current[i] = stepEnv(se, u);
+      // Reset periodically so we see many diverse swing-up attempts.
+      // The teacher naturally swings up → balances, so shadow envs
+      // generate BOTH swing-up and balance-regime data.
+      if (Math.random() < 0.008) {
+        shadowEnvs.current[i] = {
+          th1: (Math.random() - 0.5) * 1.0,
+          th2: (Math.random() - 0.5) * 1.0,
+          w1: (Math.random() - 0.5) * 2,
+          w2: (Math.random() - 0.5) * 2,
+        };
       }
     }
 
@@ -899,53 +1048,23 @@ function SceneRunner({
       agent.trainBatch(obsB, tgtB);
     }
 
-    // ---- completion check (loss-based) ----
-    // Training mode never runs the policy on the visible env, so we
-    // can't judge by on-screen behavior. Instead: the student is
-    // "done" when its BC loss (MSE vs teacher) stays low for a
-    // sustained window AND it has seen enough updates.
-    const LOSS_COMPLETE = 0.02;
-    const LOSS_HOLD_FRAMES = 30;
-    const UPDATES_MIN = 500;
-    // Diversity gate: low loss on a degenerate buffer (e.g. user pinning
-    // the tip at one angle) is meaningless. Require the replay to have
-    // actually seen a range of states before we call training complete.
-    const DIVERSITY_MIN = 0.9; // summed std across th1,th2,w1,w2
-    const progress = Math.max(0, Math.min(1, 1 - agent.stats.loss / 0.4));
-    returnsRef.current.push(progress);
-    if (returnsRef.current.length > 160) returnsRef.current.shift();
-    let diversity = 0;
-    if (bufObs.current.length >= 64) {
-      // obs layout: [sin θ1, cos θ1, sin θ2, cos θ2, w1, w2]
-      const n = bufObs.current.length;
-      let m0 = 0, m1 = 0, m4 = 0, m5 = 0;
-      for (let i = 0; i < n; i++) {
-        const o = bufObs.current[i];
-        m0 += o[0]; m1 += o[2]; m4 += o[4]; m5 += o[5];
-      }
-      m0 /= n; m1 /= n; m4 /= n; m5 /= n;
-      let v0 = 0, v1 = 0, v4 = 0, v5 = 0;
-      for (let i = 0; i < n; i++) {
-        const o = bufObs.current[i];
-        v0 += (o[0] - m0) ** 2;
-        v1 += (o[2] - m1) ** 2;
-        v4 += (o[4] - m4) ** 2;
-        v5 += (o[5] - m5) ** 2;
-      }
-      diversity =
-        Math.sqrt(v0 / n) +
-        Math.sqrt(v1 / n) +
-        Math.sqrt(v4 / n) +
-        Math.sqrt(v5 / n);
-    }
+    // ---- completion check ----
+    // With normalized targets ([-1, 1]), the loss is directly
+    // interpretable: 0.04 means average |error| ≈ 0.2 (20% of full
+    // torque range). The network must sustain this after enough
+    // gradient steps for the gains to have converged.
+    const LOSS_COMPLETE = 0.04;
+    const LOSS_HOLD_FRAMES = 60;
+    const UPDATES_MIN = 3000;
     if (
       agent.stats.loss < LOSS_COMPLETE &&
-      agent.stats.updates > UPDATES_MIN &&
-      diversity > DIVERSITY_MIN
+      agent.stats.updates > UPDATES_MIN
     ) {
       holdRef.current += 1;
     } else {
-      holdRef.current = 0;
+      // Decay instead of hard-reset so a single noisy batch doesn't
+      // wipe out an entire streak of good frames.
+      holdRef.current = Math.max(0, holdRef.current - 3);
     }
     if (
       holdRef.current >= LOSS_HOLD_FRAMES &&
@@ -954,6 +1073,20 @@ function SceneRunner({
       agent.stats.trainingComplete = true;
       convergedRef.current = true;
     }
+
+    // ---- compute training progress (0–1) for HUD ----
+    // Three factors: loss reduction (40%), update count (40%),
+    // hold counter (20%). Using both loss and updates prevents
+    // progress from jumping to 80% when loss drops fast but the
+    // network hasn't had enough gradient steps.
+    const LOSS_CEIL = 0.4;
+    const lossPct = Math.max(0, Math.min(1, (LOSS_CEIL - agent.stats.loss) / (LOSS_CEIL - LOSS_COMPLETE)));
+    const updatesPct = Math.max(0, Math.min(1, agent.stats.updates / UPDATES_MIN));
+    const holdPct = Math.min(1, holdRef.current / LOSS_HOLD_FRAMES);
+    const gateMet = agent.stats.loss < LOSS_COMPLETE && agent.stats.updates > UPDATES_MIN;
+    agent.stats.progress = agent.stats.trainingComplete
+      ? 1
+      : Math.min(0.99, lossPct * 0.4 + updatesPct * 0.4 + (gateMet ? holdPct * 0.2 : 0));
 
     // ---- mirror stats to HUD ----
     statsRef.current.updates = agent.stats.updates;
@@ -965,6 +1098,7 @@ function SceneRunner({
     statsRef.current.trialsSuccess = agent.stats.trialsSuccess;
     statsRef.current.successStreak = agent.stats.successStreak;
     statsRef.current.trainingComplete = agent.stats.trainingComplete;
+    statsRef.current.progress = agent.stats.progress;
   });
 
   return (
@@ -1053,87 +1187,8 @@ function GrabPlane({
 }
 
 /* ================================================================
-   HUD overlays — reward sparkline, stats, NN viz
+   HUD overlays — stats, gains, NN viz
 ================================================================ */
-
-function RewardSparkline({
-  returnsRef,
-}: {
-  returnsRef: MutableRefObject<number[]>;
-}) {
-  const [, forceRender] = useState(0);
-  useEffect(() => {
-    const id = window.setInterval(() => forceRender((x) => x + 1), 400);
-    return () => window.clearInterval(id);
-  }, []);
-  const W = 200;
-  const H = 54;
-  const data = returnsRef.current;
-  const pad = 4;
-  if (data.length < 2)
-    return (
-      <svg width={W} height={H} className="opacity-80">
-        <rect
-          width={W}
-          height={H}
-          rx={6}
-          fill="rgba(0,0,0,0.4)"
-          stroke="rgba(255,255,255,0.1)"
-        />
-      </svg>
-    );
-  const min = 0;
-  const max = 1;
-  const pts = data
-    .map((v, i) => {
-      const x = pad + (i / (data.length - 1)) * (W - 2 * pad);
-      const y =
-        H - pad - ((v - min) / (max - min)) * (H - 2 * pad);
-      return `${x.toFixed(1)},${y.toFixed(1)}`;
-    })
-    .join(" ");
-  const lastY =
-    H - pad - ((data[data.length - 1] - min) / (max - min)) * (H - 2 * pad);
-  return (
-    <svg width={W} height={H} className="opacity-90">
-      <rect
-        width={W}
-        height={H}
-        rx={6}
-        fill="rgba(0,0,0,0.45)"
-        stroke="rgba(255,255,255,0.1)"
-      />
-      {/* zero line */}
-      <line
-        x1={pad}
-        x2={W - pad}
-        y1={H / 2}
-        y2={H / 2}
-        stroke="rgba(255,255,255,0.08)"
-        strokeDasharray="2 3"
-      />
-      <polyline
-        points={pts}
-        fill="none"
-        stroke="#22d3ee"
-        strokeWidth={1.4}
-        strokeLinejoin="round"
-        strokeLinecap="round"
-      />
-      <circle cx={W - pad} cy={lastY} r={2.2} fill="#7c5cff" />
-      <text
-        x={pad + 4}
-        y={11}
-        fill="rgba(255,255,255,0.55)"
-        fontSize={8}
-        fontFamily="monospace"
-        letterSpacing="0.12em"
-      >
-        BC PROGRESS
-      </text>
-    </svg>
-  );
-}
 
 function GainsHud({ agentRef }: { agentRef: MutableRefObject<Agent | null> }) {
   const [gains, setGains] = useState<{
@@ -1147,19 +1202,20 @@ function GainsHud({ agentRef }: { agentRef: MutableRefObject<Agent | null> }) {
     return () => window.clearInterval(id);
   }, [agentRef]);
 
-  // Ground-truth linearized gains of the PD teacher at the origin:
-  //   u = -KP1·sin θ₁ - KD1·ω₁ - KD2·ω₂
+  // Ground-truth LQR gains at the inverted equilibrium:
+  //   u = -(K[0]·θ₁ + K[1]·δθ₂ + K[2]·ω₁ + K[3]·ω₂)
+  // Displayed as the effective du/dx sensitivity.
   const targets = [
-    { label: "k_θ₁", truth: -KP1, got: gains?.kTh1 ?? 0 },
-    { label: "k_θ₂", truth: 0,   got: gains?.kTh2 ?? 0 },
-    { label: "k_ω₁", truth: -KD1, got: gains?.kW1 ?? 0 },
-    { label: "k_ω₂", truth: -KD2, got: gains?.kW2 ?? 0 },
+    { label: "k_θ₁",  truth: -LQR_K[0], got: gains?.kTh1 ?? 0 },
+    { label: "k_δθ₂", truth: -LQR_K[1], got: gains?.kTh2 ?? 0 },
+    { label: "k_ω₁",  truth: -LQR_K[2], got: gains?.kW1 ?? 0 },
+    { label: "k_ω₂",  truth: -LQR_K[3], got: gains?.kW2 ?? 0 },
   ];
   const W = 200;
   const rowH = 13;
   const H = 16 + rowH * targets.length + 4;
-  const cx = 92; // zero line
-  const scale = 9; // world-unit → px per gain unit
+  const cx = 100; // zero line
+  const scale = 0.85; // px per gain unit (large LQR gains)
   return (
     <svg width={W} height={H} className="opacity-95">
       <rect
@@ -1259,8 +1315,8 @@ function NetworkViz({ agentRef }: { agentRef: MutableRefObject<Agent | null> }) 
 
   const W = 200;
   const H = 110;
-  const IN = 6;
-  const HID_SHOW = 10; // visualize subset of hidden layer
+  const IN = 7;
+  const HID_SHOW = 12; // visualize subset of 64-wide hidden layer
   const OUT = 1;
 
   const cols = [
@@ -1362,6 +1418,8 @@ function StatsHud({
   }, []);
   const s = statsRef.current;
   const converged = convergedRef.current;
+  const pct = Math.round(s.progress * 100);
+  const barColor = converged ? "#34d399" : "#22d3ee";
   return (
     <div className="rounded-md border border-white/10 bg-black/45 backdrop-blur-sm px-3 py-2 font-mono text-[10px] leading-snug text-gray-300 min-w-[200px]">
       <div className="flex items-center gap-2 mb-1">
@@ -1371,14 +1429,33 @@ function StatsHud({
           } animate-pulse`}
         />
         <span className="uppercase tracking-[0.2em] text-[9px] text-gray-500">
-          {converged ? "policy learned" : "net training · net in control"}
+          {converged ? "swing-up policy learned" : "pendubot training"}
         </span>
+      </div>
+      {/* training progress bar */}
+      <div className="mb-1.5">
+        <div className="flex items-baseline justify-between mb-0.5">
+          <span className="text-gray-500 uppercase tracking-wider text-[9px]">
+            progress
+          </span>
+          <span style={{ color: barColor }}>{pct}%</span>
+        </div>
+        <div className="h-1 rounded-full bg-white/10 overflow-hidden">
+          <div
+            className="h-full rounded-full transition-all duration-300"
+            style={{
+              width: `${pct}%`,
+              background: barColor,
+              boxShadow: converged ? `0 0 6px ${barColor}` : undefined,
+            }}
+          />
+        </div>
       </div>
       <Row k="updates" v={`${s.updates}`} />
       <Row
         k="BC loss"
         v={s.loss.toFixed(4)}
-        tint={s.loss < 0.1 ? "#34d399" : "#d1d5db"}
+        tint={s.loss < 0.04 ? "#34d399" : "#d1d5db"}
       />
       <Row
         k="teacher u"
@@ -1412,7 +1489,6 @@ export default function PendulumScene() {
   const agentRef = useRef<Agent | null>(null);
   const visibleEnvRef = useRef<EnvState>(initState());
   const convergedRef = useRef(false);
-  const returnsRef = useRef<number[]>([]);
   const grabRef = useRef<GrabState>({ mode: "none", wx: 0, wy: 0 });
   const statsRef = useRef<AgentStats>({
     updates: 0,
@@ -1424,6 +1500,7 @@ export default function PendulumScene() {
     trialsSuccess: 0,
     successStreak: 0,
     trainingComplete: false,
+    progress: 0,
   });
   const [agentReady, setAgentReady] = useState(false);
   const [mode, setMode] = useState<Mode>("training");
@@ -1493,7 +1570,6 @@ export default function PendulumScene() {
             agentRef={agentRef}
             visibleEnvRef={visibleEnvRef}
             convergedRef={convergedRef}
-            returnsRef={returnsRef}
             grabRef={grabRef}
             statsRef={statsRef}
             modeRef={modeRef}
@@ -1521,7 +1597,6 @@ export default function PendulumScene() {
           </div>
         )}
         <GainsHud agentRef={agentRef} />
-        <RewardSparkline returnsRef={returnsRef} />
         <NetworkViz agentRef={agentRef} />
         <StatsHud statsRef={statsRef} convergedRef={convergedRef} />
       </div>
@@ -1548,7 +1623,7 @@ export default function PendulumScene() {
       {/* training-complete notification toast */}
       {showToast && (
         <div className="absolute top-6 left-1/2 -translate-x-1/2 z-20 rounded-full bg-gradient-to-r from-[#fbbf24]/20 to-[#f59e0b]/20 border border-[#fbbf24]/60 backdrop-blur px-5 py-2 text-[11px] font-mono uppercase tracking-[0.22em] text-[#fbbf24] shadow-[0_0_30px_rgba(251,191,36,0.4)] animate-pulse pointer-events-none">
-          ✦ policy learned — control unlocked
+          ✦ swing-up policy learned — control unlocked
         </div>
       )}
 

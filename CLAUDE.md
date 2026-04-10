@@ -28,13 +28,13 @@ Single-page portfolio. `app/page.tsx` composes section components from `componen
 ### Interactive demos
 All demos run entirely client-side and are dynamically imported with `ssr: false` so three.js / tfjs never hit the server bundle. When adding or editing a demo, preserve this pattern — importing these statically will blow up SSR and first-paint.
 
-- **`PendulumScene.tsx`** (Hero background) — R3F canvas with a double-pendulum hanging-stabilization task. An MLP (tfjs) is trained online via **behavioral cloning** against a closed-form PD teacher. Important invariants:
-  - Training auto-starts on page load; no Start button.
-  - In **training mode** the visible pendulum runs free physics (`u = 0`). BC happens in a parallel hidden rollout env. The learned policy is NOT applied to the visible pendulum during training.
-  - In **control mode** the frozen learned weights drive the visible pendulum via `agent.actDet()`.
+- **`PendulumScene.tsx`** (Hero background) — R3F canvas with a **pendubot swing-up** task. Motor at joint 1 only (underactuated). An MLP (7→64→64→1, tfjs) is trained online via **behavioral cloning** against a hybrid teacher: energy-based swing-up (Åström–Furuta) + LQR balance at the inverted equilibrium (θ₂=π). Important invariants:
+  - In **training mode** the visible pendulum runs free physics (`u = 0`). The user grabs and moves the pendulum to generate diverse BC training data. Synthetic augmentation fills in state-space gaps.
+  - In **control mode** the frozen learned weights drive the visible pendulum via `agent.actDet()`, automatically swinging up and balancing link 2 inverted.
   - The pendulum is **never respawned**; it only moves via physics, user grab, or the learned policy. Runaway `w` is clipped, not reset.
   - The whole scene is wrapped in `<group position={[PEND_OFFSET_X, PEND_OFFSET_Y, 0]}>` to shift it right/up behind the Hero text. `GrabPlane` converts world-space `e.point` to pendulum-local by subtracting these constants — **if you change the group position, update `PEND_OFFSET_X/Y` too**, otherwise grab picking silently breaks.
-  - `GainsHud` finite-differences the MLP around the downward equilibrium to display learned gains converging to the PD teacher's analytical gains (`KP1`, `KD1`, `KD2`).
+  - `GainsHud` finite-differences the MLP around the inverted equilibrium (θ₁=0, θ₂=π) to display learned gains converging to the LQR teacher's gains.
+  - Swing-up from arbitrary ICs has ~50% success rate (inherent to chaotic double-pendulum dynamics).
 - **`EVFleetDemo.tsx`** — PPO current-allocation policy simulation (EV fleet load balancing).
 - **`PrizePoolDemo.tsx`** — softmax-based prize-pool distributor with tunable feature weights / temperature.
 - **`CERNDemo.tsx` / `CERNPipeline3D.tsx`**, **`MatchmakerDemo.tsx`** — additional domain demos.

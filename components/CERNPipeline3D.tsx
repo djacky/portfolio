@@ -32,11 +32,11 @@ const PHASES = {
   gateway: { start: 2.2,  end: 4.6  },
   route:   { start: 4.6,  end: 6.6  },
   solve:   { start: 6.6,  end: 11.4 },
-  persist: { start: 11.4, end: 13.4 },
-  respond: { start: 13.4, end: 15.0 },
-  done:    { start: 15.0, end: 16.6 },
+  persist: { start: 11.4, end: 15.4 },
+  respond: { start: 15.4, end: 17.0 },
+  done:    { start: 17.0, end: 18.6 },
 };
-const TOTAL_DURATION = 16.6;
+const TOTAL_DURATION = 18.6;
 
 /* ---------------- helpers ---------------- */
 
@@ -66,7 +66,12 @@ function packetPos(t: number, out: THREE.Vector3): THREE.Vector3 {
     return out.copy(POS.solver);
   }
   if (t < PHASES.persist.end) {
-    return lerpVec(POS.solver, POS.postgres, smoothstep(PHASES.persist.start, PHASES.persist.end, t), out);
+    // Travel from solver → postgres in the first 2s, then dwell.
+    const arriveBy = PHASES.persist.start + 2.0;
+    if (t < arriveBy) {
+      return lerpVec(POS.solver, POS.postgres, smoothstep(PHASES.persist.start, arriveBy, t), out);
+    }
+    return out.copy(POS.postgres);
   }
   if (t < PHASES.respond.end) {
     return lerpVec(POS.postgres, POS.client, smoothstep(PHASES.respond.start, PHASES.respond.end, t), out);
@@ -104,8 +109,11 @@ function cameraTarget(t: number, packet: THREE.Vector3, posOut: THREE.Vector3, l
     return;
   }
   if (t < PHASES.persist.end) {
-    posOut.set(packet.x + 1, 4, packet.z + 6.5);
-    lookOut.copy(packet);
+    // Slow orbit around the Postgres node so the viewer can take it in.
+    const u = (t - PHASES.persist.start) / (PHASES.persist.end - PHASES.persist.start);
+    const ang = -0.3 + u * 0.6;
+    posOut.set(POS.postgres.x + Math.sin(ang) * 7, 3.5, POS.postgres.z + Math.cos(ang) * 7);
+    lookOut.set(POS.postgres.x, 0.8, POS.postgres.z);
     return;
   }
   if (t < PHASES.respond.end) {

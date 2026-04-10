@@ -10,7 +10,27 @@
       "WebFetch(domain:brittanychiang.com)",
       "WebFetch(domain:dennissnellenberg.com)",
       "Bash(npm run:*)",
-      "WebFetch(domain:daveholloway.uk)"
+      "WebFetch(domain:daveholloway.uk)",
+      "Bash(python3 -c \"import scipy; import numpy; print\\('scipy', scipy.__version__, 'numpy', numpy.__version__\\)\")",
+      "Bash(python -c \"import scipy; import numpy; print\\('scipy', scipy.__version__, 'numpy', numpy.__version__\\)\")",
+      "WebFetch(domain:underactuated.mit.edu)",
+      "WebFetch(domain:arxiv.org)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:www.mdpi.com)",
+      "WebFetch(domain:www.academia.edu)",
+      "WebFetch(domain:hybrid.soe.ucsc.edu)",
+      "WebFetch(domain:mae.ucf.edu)",
+      "WebFetch(domain:www.sciencedirect.com)",
+      "WebFetch(domain:discovery.researcher.life)",
+      "WebFetch(domain:skoge.folk.ntnu.no)",
+      "WebFetch(domain:dfki-ric-underactuated-lab.github.io)",
+      "WebFetch(domain:coecsl.ece.illinois.edu)",
+      "WebFetch(domain:web.ece.ucsb.edu)",
+      "WebFetch(domain:www.control.utoronto.ca)",
+      "WebFetch(domain:en.wikipedia.org)",
+      "WebFetch(domain:apmonitor.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(netstat -ano)"
     ]
   }
 }
