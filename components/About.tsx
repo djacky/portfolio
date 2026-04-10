@@ -1,6 +1,7 @@
 "use client";
 import { motion } from "framer-motion";
 import { Brain, Cloud, Cpu, Rocket } from "lucide-react";
+import TiltCard from "./TiltCard";
 
 const pillars = [
   {
@@ -42,11 +43,14 @@ export default function About() {
             whileInView={{ opacity: 1, y: 0 }}
             viewport={{ once: true, margin: "-80px" }}
             transition={{ delay: i * 0.08 }}
-            className="glass rounded-2xl p-6 hover:border-accent/40 transition-colors"
           >
-            <p.icon className="w-6 h-6 text-accent" />
-            <h3 className="mt-4 text-lg font-medium text-white">{p.title}</h3>
-            <p className="mt-2 text-sm text-gray-400 leading-relaxed">{p.body}</p>
+            <TiltCard className="h-full rounded-2xl">
+              <div className="glass rounded-2xl p-6 hover:border-accent/40 transition-colors h-full">
+                <p.icon className="w-6 h-6 text-accent" />
+                <h3 className="mt-4 text-lg font-medium text-white">{p.title}</h3>
+                <p className="mt-2 text-sm text-gray-400 leading-relaxed">{p.body}</p>
+              </div>
+            </TiltCard>
           </motion.div>
         ))}
       </div>

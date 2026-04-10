@@ -135,7 +135,7 @@ type EdgeRef = {
 
 /* =================== component =================== */
 
-function NeuralGraph() {
+function NeuralGraph({ onHoverGroup }: { onHoverGroup: (i: number | null) => void }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const cardRefs = useRef<(HTMLDivElement | null)[]>([]);
@@ -522,6 +522,8 @@ function NeuralGraph() {
               cardRefs.current[i] = el;
             }}
             className="absolute top-0 left-0 select-none"
+            onMouseEnter={() => onHoverGroup(i)}
+            onMouseLeave={() => onHoverGroup(null)}
             style={{
               width: CARD_W,
               height: CARD_H,
@@ -595,7 +597,8 @@ function NeuralGraph() {
 export default function Skills() {
   return (
     <section id="skills" className="relative mx-auto max-w-6xl px-6 py-24">
-      <header className="mb-10">
+
+      <header className="relative mb-10">
         <p className="text-xs uppercase tracking-[0.25em] text-accent2">
           Stack
         </p>
@@ -613,8 +616,9 @@ export default function Skills() {
         whileInView={{ opacity: 1, y: 0 }}
         viewport={{ once: true, margin: "-80px" }}
         transition={{ duration: 0.6 }}
+        className="relative"
       >
-        <NeuralGraph />
+        <NeuralGraph onHoverGroup={() => {}} />
       </motion.div>
 
       {/* tooling strip */}
@@ -623,7 +627,7 @@ export default function Skills() {
         whileInView={{ opacity: 1, y: 0 }}
         viewport={{ once: true, margin: "-80px" }}
         transition={{ delay: 0.2 }}
-        className="mt-8"
+        className="relative mt-8"
       >
         <div className="flex items-center gap-3 text-[10px] uppercase tracking-[0.25em] text-gray-500 mb-3">
           <Wrench className="w-3 h-3" />

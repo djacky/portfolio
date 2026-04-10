@@ -1070,7 +1070,7 @@ export default function EVFleetDemo() {
                       borderRadius: 8,
                       fontSize: 11,
                     }}
-                    formatter={(v: number | null) => (v == null ? "—" : `${v}%`)}
+                    formatter={(v: unknown) => (v == null ? "—" : `${v}%`)}
                   />
                   <Legend
                     verticalAlign="top"

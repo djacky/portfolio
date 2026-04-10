@@ -2,6 +2,7 @@
 import { motion } from "framer-motion";
 import { Mail, MessageSquare } from "lucide-react";
 import { useContactDrawer } from "./ContactDrawer";
+import TiltCard from "./TiltCard";
 
 export default function Contact() {
   const { open } = useContactDrawer();
@@ -11,9 +12,10 @@ export default function Contact() {
         initial={{ opacity: 0, y: 20 }}
         whileInView={{ opacity: 1, y: 0 }}
         viewport={{ once: true, margin: "-80px" }}
-        className="shimmer-border rounded-3xl"
       >
-        <div className="glass rounded-3xl p-10 md:p-14 text-center">
+        <TiltCard className="rounded-3xl">
+          <div className="shimmer-border rounded-3xl">
+            <div className="glass rounded-3xl p-10 md:p-14 text-center">
           <p className="text-xs uppercase tracking-[0.25em] text-accent2">Contact</p>
           <h2 className="mt-3 text-4xl md:text-5xl font-semibold text-gradient">
             Let&apos;s build something hard together.
@@ -37,7 +39,9 @@ export default function Contact() {
               <Mail className="w-4 h-4" /> Email me
             </a>
           </div>
-        </div>
+            </div>
+          </div>
+        </TiltCard>
       </motion.div>
     </section>
   );
