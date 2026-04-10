@@ -33,8 +33,12 @@ body {
   border: 1px solid rgba(255,255,255,0.06);
 }
 
+h1, h2, h3 {
+  font-family: var(--font-display), ui-sans-serif, system-ui, sans-serif;
+}
+
 .text-gradient {
-  background: linear-gradient(90deg, #fff 0%, #c4b5fd 40%, #22d3ee 100%);
+  background: linear-gradient(105deg, #f0f0f0 0%, #c4b5fd 35%, #a78bfa 55%, #22d3ee 100%);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;

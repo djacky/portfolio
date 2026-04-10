@@ -23,6 +23,7 @@ const LINKS: Link[] = [
   { href: "#experience", label: "Experience" },
   { href: "#demos", label: "Demos" },
   { href: "#skills", label: "Stack" },
+  { href: "#publications", label: "Research" },
   { href: "#contact", label: "Contact" },
 ];
 
@@ -98,7 +99,7 @@ export default function Nav() {
       {/* floating wordmark — top-left, independent of the pill */}
       <a
         href="#top"
-        className={`fixed top-5 left-5 md:left-8 z-50 font-mono text-sm tracking-tight transition-opacity ${
+        className={`fixed top-5 left-5 md:left-8 z-50 font-display text-sm tracking-tight transition-opacity ${
           scrolled ? "opacity-100" : "opacity-90"
         }`}
       >

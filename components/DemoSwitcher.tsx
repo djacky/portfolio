@@ -26,6 +26,7 @@ const TABS: {
   sub: string;
   icon: typeof Zap;
   tint: string;
+  context: string;
 }[] = [
   {
     key: "ev",
@@ -34,6 +35,8 @@ const TABS: {
     sub: "Eaton · live RL training",
     icon: Zap,
     tint: "#22d3ee",
+    context:
+      "How do you split limited power across dozens of electric vehicles charging at once — without blowing the grid? This demo trains a reinforcement learning agent in your browser to make that decision in real time, the same way the production system does for Eaton's global charger fleet.",
   },
   {
     key: "matchmaker",
@@ -42,6 +45,8 @@ const TABS: {
     sub: "Disruptive Labs · embedding retrieval",
     icon: Users,
     tint: "#7c5cff",
+    context:
+      "Fair matchmaking means grouping players of similar skill — fast. This demo trains a neural network to map each player into a 2D \"skill fingerprint,\" then clusters similar players into lobbies. Watch the embeddings reorganize in real time as the model learns from match outcomes.",
   },
   {
     key: "cern",
@@ -50,6 +55,8 @@ const TABS: {
     sub: "LHC · H∞ pipeline",
     icon: Atom,
     tint: "#34d399",
+    context:
+      "The LHC's magnets need controllers tuned to sub-ppm precision — but each power converter behaves slightly differently. This demo recreates the automated pipeline I built at CERN: feed in a frequency response, pick your performance specs, and get back a ready-to-deploy controller.",
   },
   {
     key: "ilc",
@@ -58,6 +65,8 @@ const TABS: {
     sub: "CERN · data-driven ILC",
     icon: Activity,
     tint: "#fbbf24",
+    context:
+      "Particle physics experiments need magnet currents that follow precise ramp profiles, but real hardware drifts. This demo shows iterative learning control — the algorithm watches each ramp, learns from the tracking error, and converges on a correction signal that nails the reference.",
   },
 ];
 
@@ -152,6 +161,20 @@ export default function DemoSwitcher() {
           })}
         </div>
       </div>
+
+      {/* CONTEXT — accessible description of what the active demo does */}
+      <AnimatePresence mode="wait">
+        <motion.p
+          key={`ctx-${active}`}
+          initial={{ opacity: 0, y: 8 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -4 }}
+          transition={{ duration: 0.25 }}
+          className="mx-auto max-w-3xl mb-8 text-sm text-gray-400 leading-relaxed text-center"
+        >
+          {TABS.find((t) => t.key === active)?.context}
+        </motion.p>
+      </AnimatePresence>
 
       {/* PANEL — only the active demo is mounted */}
       <AnimatePresence mode="wait">
