@@ -4,18 +4,17 @@
    behavioral-cloning agent converges. Client-side localStorage
    dedupe prevents a single browser from spamming the endpoint.
 
-   Env vars (set in Vercel → Project → Settings → Environment
-   Variables, or auto-injected when you attach an Upstash Redis
-   integration via the Vercel Marketplace):
-     UPSTASH_REDIS_REST_URL
-     UPSTASH_REDIS_REST_TOKEN
+   Env vars:
+     REDIS_URL — standard redis:// connection string. Auto-injected
+     when you attach Redis Cloud via the Vercel Marketplace. Pull
+     to local with `npx vercel env pull .env.development.local`.
 
-   In local dev without these env vars, POST returns { trainings: 0 }
+   In local dev without REDIS_URL, POST returns { trainings: 0 }
    so the UI still works.
 ------------------------------------------------------------------ */
 
 import { NextResponse } from "next/server";
-import { Redis } from "@upstash/redis";
+import { getRedis } from "@/lib/redis";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -23,11 +22,11 @@ export const dynamic = "force-dynamic";
 const TRAININGS_KEY = "pendulum:trainings";
 
 export async function POST() {
-  if (!process.env.UPSTASH_REDIS_REST_URL || !process.env.UPSTASH_REDIS_REST_TOKEN) {
+  const redis = await getRedis();
+  if (!redis) {
     return NextResponse.json({ trainings: 0, kv: false });
   }
   try {
-    const redis = Redis.fromEnv();
     const next = await redis.incr(TRAININGS_KEY);
     return NextResponse.json({ trainings: next, kv: true });
   } catch (err) {
@@ -40,13 +39,14 @@ export async function POST() {
 }
 
 export async function GET() {
-  if (!process.env.UPSTASH_REDIS_REST_URL || !process.env.UPSTASH_REDIS_REST_TOKEN) {
+  const redis = await getRedis();
+  if (!redis) {
     return NextResponse.json({ trainings: 0 });
   }
   try {
-    const redis = Redis.fromEnv();
-    const v = await redis.get<number>(TRAININGS_KEY);
-    return NextResponse.json({ trainings: typeof v === "number" ? v : 0 });
+    const v = await redis.get(TRAININGS_KEY);
+    const n = Number(v);
+    return NextResponse.json({ trainings: Number.isFinite(n) ? n : 0 });
   } catch {
     return NextResponse.json({ trainings: 0 });
   }

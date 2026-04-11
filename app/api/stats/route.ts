@@ -7,16 +7,17 @@
        lib/siteStats.json (single source of truth, edit + push).
        Google Scholar has no public API, so these are maintained
        manually — update whenever the numbers meaningfully change.
-     - trainings:  global counter in Upstash Redis, incremented by
+     - trainings:  global counter in Redis, incremented by
        /api/stats/trainings.
 
    Env vars (only needed for the trainings counter):
-     UPSTASH_REDIS_REST_URL, UPSTASH_REDIS_REST_TOKEN — auto-set
-     when you attach Upstash Redis via the Vercel Marketplace.
+     REDIS_URL — auto-injected when you attach Redis Cloud via
+     the Vercel Marketplace. For local dev, pull with
+     `npx vercel env pull .env.development.local`.
 ------------------------------------------------------------------ */
 
 import { NextResponse } from "next/server";
-import { Redis } from "@upstash/redis";
+import { getRedis } from "@/lib/redis";
 import siteStatsJson from "@/lib/siteStats.json";
 import type { SiteStats } from "@/lib/siteStats";
 
@@ -26,13 +27,12 @@ export const dynamic = "force-dynamic";
 const TRAININGS_KEY = "pendulum:trainings";
 
 async function readTrainings(): Promise<number> {
-  if (!process.env.UPSTASH_REDIS_REST_URL || !process.env.UPSTASH_REDIS_REST_TOKEN) {
-    return 0;
-  }
+  const redis = await getRedis();
+  if (!redis) return 0;
   try {
-    const redis = Redis.fromEnv();
-    const v = await redis.get<number>(TRAININGS_KEY);
-    return typeof v === "number" ? v : 0;
+    const v = await redis.get(TRAININGS_KEY);
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
   } catch {
     return 0;
   }
