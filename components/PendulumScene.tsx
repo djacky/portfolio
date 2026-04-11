@@ -1528,30 +1528,44 @@ export default function PendulumScene() {
     };
   }, []);
 
+  // Guard to ensure we increment the global counter exactly once
+  // per Agent lifetime (= once per page session). Refreshing the
+  // page gives a fresh agent, which is intentional — that's how a
+  // visitor's "second training" shows up as a distinct count.
+  const countedRef = useRef(false);
+
   // Poll for training completion — flips a one-shot notification toast
   // and unlocks the Control button.
   useEffect(() => {
     if (trainingDone) return;
     const id = window.setInterval(() => {
-      if (statsRef.current.trainingComplete) {
+      if (statsRef.current.trainingComplete && !countedRef.current) {
+        countedRef.current = true;
         setTrainingDone(true);
         setShowToast(true);
         window.setTimeout(() => setShowToast(false), 4200);
 
-        /* Bump the global trainings counter once per browser.
-           Dedupe via localStorage so refreshes and re-mounts don't
-           inflate the count for a single visitor. */
-        try {
-          const KEY = "pendulum_counted_v1";
-          if (!window.localStorage.getItem(KEY)) {
-            window.localStorage.setItem(KEY, "1");
-            fetch("/api/stats/trainings", { method: "POST" }).catch(() => {
-              /* silent — counter is best-effort */
-            });
+        /* Bump the global trainings counter. One POST per converged
+           agent — the countedRef guard prevents interval re-fires
+           from double-counting before React commits the state. On
+           success, broadcast the new count so the Hero credentials
+           strip can update live without a page refresh. */
+        (async () => {
+          try {
+            const res = await fetch("/api/stats/trainings", { method: "POST" });
+            if (!res.ok) return;
+            const data = (await res.json()) as { trainings?: number };
+            if (typeof data.trainings === "number") {
+              window.dispatchEvent(
+                new CustomEvent("pendulum-training-complete", {
+                  detail: { trainings: data.trainings },
+                }),
+              );
+            }
+          } catch {
+            /* silent — counter is best-effort */
           }
-        } catch {
-          /* localStorage unavailable (private mode etc.) — skip */
-        }
+        })();
       }
     }, 150);
     return () => window.clearInterval(id);

@@ -68,6 +68,22 @@ function FadingCredentials() {
     };
   }, []);
 
+  /* Listen for live training-complete events from PendulumScene and
+     patch the trainings count in place so the rotating credential
+     reflects the new global total without a page refresh. */
+  useEffect(() => {
+    const onTrained = (e: Event) => {
+      const detail = (e as CustomEvent<{ trainings?: number }>).detail;
+      if (!detail || typeof detail.trainings !== "number") return;
+      setStats((prev) =>
+        prev ? { ...prev, trainings: detail.trainings! } : prev,
+      );
+    };
+    window.addEventListener("pendulum-training-complete", onTrained);
+    return () =>
+      window.removeEventListener("pendulum-training-complete", onTrained);
+  }, []);
+
   const credentials = buildCredentials(stats);
 
   useEffect(() => {

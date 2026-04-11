@@ -40,7 +40,9 @@
       "Bash(grep -A 3 \"OrbitControls\\\\|Float\\\\|Line\" /a/Projects/portfolio/components/*.tsx)",
       "Bash(grep -v \"^--$\")",
       "Bash(node node_modules/typescript/bin/tsc --noEmit)",
-      "Bash(echo \"EXIT=$?\")"
+      "Bash(echo \"EXIT=$?\")",
+      "Bash(node node_modules/typescript/lib/tsc.js --noEmit)",
+      "Bash(echo \"exit: $?\")"
     ]
   }
 }
