@@ -1,16 +1,21 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import { ExternalLink, BookOpen } from "lucide-react";
+import Typewriter from "./Typewriter";
+import type { SiteStats } from "@/lib/siteStats";
 
 const SCHOLAR_URL =
   "https://scholar.google.com/citations?user=Fes_eScAAAAJ&hl=en";
 
-const STATS = {
-  citations: 357,
+/* Initial placeholder values shown while /api/stats is loading.
+   Replaced by live OpenAlex data once the fetch resolves. */
+const INITIAL_STATS = {
   hIndex: 9,
   i10Index: 9,
   papers: 20,
+  citations: 340,
 };
 
 type Paper = {
@@ -18,7 +23,6 @@ type Paper = {
   authors: string;
   venue: string;
   year: number;
-  citations: number;
 };
 
 const SELECTED: Paper[] = [
@@ -30,7 +34,6 @@ const SELECTED: Paper[] = [
     venue:
       "Nuclear Instruments and Methods in Physics Research Section A",
     year: 2011,
-    citations: 140,
   },
   {
     title:
@@ -39,7 +42,6 @@ const SELECTED: Paper[] = [
     venue:
       "International Journal of Robust and Nonlinear Control",
     year: 2018,
-    citations: 71,
   },
   {
     title:
@@ -47,7 +49,6 @@ const SELECTED: Paper[] = [
     authors: "V De Oliveira, A Nicoletti, A Karimi",
     venue: "Recent Results on Time-Delay Systems: Analysis and Control",
     year: 2016,
-    citations: 29,
   },
   {
     title:
@@ -55,7 +56,6 @@ const SELECTED: Paper[] = [
     authors: "A Nicoletti, M Martino, A Karimi",
     venue: "Control Engineering Practice",
     year: 2019,
-    citations: 22,
   },
   {
     title:
@@ -63,7 +63,6 @@ const SELECTED: Paper[] = [
     authors: "A Nicoletti, M Martino, A Karimi",
     venue: "IEEE Transactions on Control Systems Technology",
     year: 2018,
-    citations: 22,
   },
   {
     title:
@@ -71,7 +70,6 @@ const SELECTED: Paper[] = [
     authors: "A Nicoletti, M Martino, D Aguglia",
     venue: "IET Control Theory & Applications",
     year: 2020,
-    citations: 11,
   },
   {
     title:
@@ -79,11 +77,35 @@ const SELECTED: Paper[] = [
     authors: "A Nicoletti",
     venue: "PhD Thesis, EPFL",
     year: 2018,
-    citations: 3,
   },
 ];
 
 export default function Publications() {
+  const [stats, setStats] = useState(INITIAL_STATS);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/stats");
+        if (!res.ok) return;
+        const data = (await res.json()) as SiteStats;
+        if (cancelled) return;
+        setStats({
+          papers: data.publications,
+          citations: data.citations,
+          hIndex: data.hIndex,
+          i10Index: data.i10Index,
+        });
+      } catch {
+        /* keep placeholders */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   return (
     <section
       id="publications"
@@ -91,38 +113,40 @@ export default function Publications() {
     >
       <motion.div
         initial={{ opacity: 0, y: 20 }}
-        whileInView={{ opacity: 1, y: 0 }}
-        viewport={{ once: true, margin: "-80px" }}
+        animate={{ opacity: 1, y: 0 }}
       >
         <header className="mb-10">
-          <p className="text-xs uppercase tracking-[0.25em] text-accent2">
-            Research
-          </p>
-          <h2 className="mt-2 text-4xl md:text-5xl font-semibold text-gradient">
-            Published work
-          </h2>
-          <p className="mt-3 text-gray-400 max-w-2xl">
-            Selected publications from a decade of research at EPFL and CERN.
-            Full list on{" "}
-            <a
-              href={SCHOLAR_URL}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-accent2 hover:underline"
-            >
-              Google&nbsp;Scholar
-            </a>
-            .
-          </p>
+          <Typewriter
+            text="Research"
+            as="p"
+            speed={60}
+            className="text-xs uppercase tracking-[0.25em] text-accent2"
+          />
+          <Typewriter
+            text="Published work"
+            as="h2"
+            speed={30}
+            delay={500}
+            showCursor={false}
+            className="mt-2 text-4xl md:text-5xl font-semibold text-gradient"
+          />
+          <Typewriter
+            text="Selected publications from a decade of research at EPFL and CERN."
+            as="p"
+            speed={18}
+            delay={1100}
+            showCursor={false}
+            className="mt-3 text-gray-400 max-w-2xl"
+          />
         </header>
 
         {/* stats strip */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-10">
+        <div className="grid grid-cols-4 gap-4 mb-10">
           {[
-            { label: "Publications", value: STATS.papers },
-            { label: "Citations", value: `${STATS.citations}+` },
-            { label: "h-index", value: STATS.hIndex },
-            { label: "i10-index", value: STATS.i10Index },
+            { label: "Publications", value: stats.papers },
+            { label: "Citations", value: stats.citations.toLocaleString("en-US") },
+            { label: "h-index", value: stats.hIndex },
+            { label: "i10-index", value: stats.i10Index },
           ].map((s) => (
             <div
               key={s.label}
@@ -144,8 +168,7 @@ export default function Publications() {
             <motion.div
               key={i}
               initial={{ opacity: 0, y: 12 }}
-              whileInView={{ opacity: 1, y: 0 }}
-              viewport={{ once: true, margin: "-40px" }}
+              animate={{ opacity: 1, y: 0 }}
               transition={{ delay: i * 0.05 }}
               className="glass rounded-xl px-5 py-4 group hover:border-accent/30 transition-colors"
             >
@@ -161,11 +184,6 @@ export default function Publications() {
                   <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] font-mono text-gray-500">
                     <span className="text-accent2/70">{p.venue}</span>
                     <span>{p.year}</span>
-                    <span>
-                      {p.citations > 0
-                        ? `${p.citations} citation${p.citations !== 1 ? "s" : ""}`
-                        : ""}
-                    </span>
                   </div>
                 </div>
               </div>
@@ -181,7 +199,7 @@ export default function Publications() {
             rel="noopener noreferrer"
             className="inline-flex items-center gap-2 text-sm text-gray-400 hover:text-accent2 transition-colors"
           >
-            View all {STATS.papers} publications on Google Scholar
+            View all {stats.papers} publications on Google Scholar
             <ExternalLink className="w-3.5 h-3.5" />
           </a>
         </div>

@@ -31,7 +31,16 @@
       "WebFetch(domain:apmonitor.com)",
       "WebFetch(domain:raw.githubusercontent.com)",
       "Bash(netstat -ano)",
-      "WebFetch(domain:scholar.google.com)"
+      "WebFetch(domain:scholar.google.com)",
+      "Bash(grep -h \"import.*from\" \"A:/Projects/portfolio/components\"/*.tsx)",
+      "Bash(curl -s -L --max-time 15 \"https://www.rubenmarcus.dev/\")",
+      "Bash(curl -s -L --max-time 15 \"https://www.google.com/search?q=cyberpunk+matrix+portfolio+website+css+animation\")",
+      "Bash(sed 's/<[^>]*>//g')",
+      "Bash(grep -r \"from.*@react-three/postprocessing\\\\|from.*@react-three/fiber\\\\|Canvas\\\\|useFrame\\\\|useThree\" /a/Projects/portfolio/components/*.tsx)",
+      "Bash(grep -A 3 \"OrbitControls\\\\|Float\\\\|Line\" /a/Projects/portfolio/components/*.tsx)",
+      "Bash(grep -v \"^--$\")",
+      "Bash(node node_modules/typescript/bin/tsc --noEmit)",
+      "Bash(echo \"EXIT=$?\")"
     ]
   }
 }

@@ -9,7 +9,7 @@
    #demo-cern.
 ------------------------------------------------------------------ */
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Zap, Users, Atom, Activity } from "lucide-react";
 import EVFleetDemo from "./EVFleetDemo";
@@ -70,34 +70,11 @@ const TABS: {
   },
 ];
 
-function hashToTab(hash: string): TabKey | null {
-  const clean = hash.replace(/^#/, "");
-  const found = TABS.find((t) => t.hash === clean);
-  return found?.key ?? null;
-}
-
 export default function DemoSwitcher() {
   const [active, setActive] = useState<TabKey>("ev");
 
-  // Deep-link support: if the URL lands on #demo-* or it changes while
-  // the user is here, switch the active tab.
-  useEffect(() => {
-    const sync = () => {
-      const k = hashToTab(window.location.hash);
-      if (k) setActive(k);
-    };
-    sync();
-    window.addEventListener("hashchange", sync);
-    return () => window.removeEventListener("hashchange", sync);
-  }, []);
-
   const selectTab = (k: TabKey) => {
     setActive(k);
-    const tab = TABS.find((t) => t.key === k);
-    if (tab && typeof window !== "undefined") {
-      // update the hash without a scroll jump
-      history.replaceState(null, "", `#${tab.hash}`);
-    }
   };
 
   return (
@@ -188,22 +165,22 @@ export default function DemoSwitcher() {
           transition={{ duration: 0.3 }}
         >
           {active === "ev" && (
-            <div id="demo-ev" className="scroll-mt-24">
+            <div id="demo-ev">
               <EVFleetDemo />
             </div>
           )}
           {active === "matchmaker" && (
-            <div id="demo-matchmaker" className="scroll-mt-24">
+            <div id="demo-matchmaker">
               <MatchmakerDemo />
             </div>
           )}
           {active === "cern" && (
-            <div id="demo-cern" className="scroll-mt-24">
+            <div id="demo-cern">
               <CERNDemo />
             </div>
           )}
           {active === "ilc" && (
-            <div id="demo-ilc" className="scroll-mt-24">
+            <div id="demo-ilc">
               <MagnetILCDemo />
             </div>
           )}

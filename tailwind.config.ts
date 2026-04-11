@@ -16,10 +16,10 @@ const config: Config = {
         bad: "#f87171",
       },
       fontFamily: {
-        display: ["var(--font-display)", "ui-sans-serif", "system-ui", "sans-serif"],
-        body: ["var(--font-body)", "ui-sans-serif", "system-ui", "sans-serif"],
-        sans: ["var(--font-body)", "ui-sans-serif", "system-ui", "sans-serif"],
-        mono: ["var(--font-mono)", "ui-monospace", "SFMono-Regular", "Menlo", "monospace"],
+        display: ["var(--font-site)", "ui-monospace", "SFMono-Regular", "Menlo", "monospace"],
+        body: ["var(--font-site)", "ui-monospace", "SFMono-Regular", "Menlo", "monospace"],
+        sans: ["var(--font-site)", "ui-monospace", "SFMono-Regular", "Menlo", "monospace"],
+        mono: ["var(--font-site)", "ui-monospace", "SFMono-Regular", "Menlo", "monospace"],
       },
       boxShadow: {
         glow: "0 0 40px -10px rgba(124,92,255,0.45)",
@@ -27,10 +27,12 @@ const config: Config = {
       keyframes: {
         float: { "0%,100%": { transform: "translateY(0)" }, "50%": { transform: "translateY(-6px)" } },
         shimmer: { "0%": { backgroundPosition: "-200% 0" }, "100%": { backgroundPosition: "200% 0" } },
+        "ticker-scroll": { from: { transform: "translateX(0)" }, to: { transform: "translateX(-33.333%)" } },
       },
       animation: {
         float: "float 6s ease-in-out infinite",
         shimmer: "shimmer 3s linear infinite",
+        "ticker-scroll": "ticker-scroll 30s linear infinite",
       },
     },
   },

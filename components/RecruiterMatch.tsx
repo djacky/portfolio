@@ -41,6 +41,7 @@ import type {
   RubricRow,
   RequirementRow,
 } from "@/lib/match-schema";
+import Typewriter from "./Typewriter";
 
 /* ---------------- sample JDs (chip row) ---------------- */
 
@@ -274,17 +275,28 @@ export default function RecruiterMatch() {
   return (
     <section id="match" className="relative mx-auto max-w-6xl px-6 py-24">
       <header className="mb-14 text-center">
-        <p className="text-xs uppercase tracking-[0.25em] text-accent2">
-          Recruiter mode · powered by {MODEL_LABEL}
-        </p>
-        <h2 className="mt-2 text-4xl md:text-5xl font-semibold text-gradient">
-          Does this role fit?
-        </h2>
-        <p className="mt-3 text-gray-400 max-w-2xl mx-auto">
-          Paste a job description. An LLM compares it against my full
-          experience and returns a segmented fit score, grounded evidence,
-          and an honest list of gaps.
-        </p>
+        <Typewriter
+          text={`Recruiter mode · powered by ${MODEL_LABEL}`}
+          as="p"
+          speed={40}
+          className="text-xs uppercase tracking-[0.25em] text-accent2"
+        />
+        <Typewriter
+          text="Does this role fit?"
+          as="h2"
+          speed={30}
+          delay={600}
+          showCursor={false}
+          className="mt-2 text-4xl md:text-5xl font-semibold text-gradient"
+        />
+        <Typewriter
+          text="Paste a job description. An LLM compares it against my full experience and returns a segmented fit score, grounded evidence, and an honest list of gaps."
+          as="p"
+          speed={18}
+          delay={1200}
+          showCursor={false}
+          className="mt-3 text-gray-400 max-w-2xl mx-auto"
+        />
       </header>
 
       <div className="shimmer-border rounded-3xl">
@@ -880,11 +892,14 @@ function SegmentedScoreRing({
           })}
         </svg>
 
-        {/* center: hovered category detail OR headline score */}
+        {/* center: hovered category detail OR headline score
+            Text must fit inside the inner circle (radius R - STROKE/2).
+            Keep content narrow and short enough that its corners never
+            punch through the ring. */}
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
           <div
             className="text-center"
-            style={{ width: R * 1.55, maxWidth: SIZE - STROKE * 4 }}
+            style={{ width: R * 1.35, maxWidth: SIZE - STROKE * 4 }}
           >
             {hoveredRow ? (
                 <motion.div
@@ -894,22 +909,30 @@ function SegmentedScoreRing({
                   transition={{ duration: 0.18 }}
                 >
                   <div
-                    className="text-[12px] uppercase tracking-[0.22em] font-mono mb-2"
+                    className="text-[11px] uppercase tracking-[0.22em] font-mono mb-1.5"
                     style={{ color: hoveredColor ?? "#94a3b8" }}
                   >
                     {hoveredRow.category}
                   </div>
                   <div
-                    className="text-7xl font-semibold tabular-nums leading-none"
+                    className="text-6xl font-semibold tabular-nums leading-none"
                     style={{ color: hoveredColor ?? meta.color }}
                   >
                     {hoveredRow.score}
                   </div>
-                  <div className="mt-1.5 text-[11px] uppercase tracking-[0.2em] font-mono text-gray-500">
+                  <div className="mt-1 text-[10px] uppercase tracking-[0.2em] font-mono text-gray-500">
                     / 100 · weight {hoveredRow.weight} ({hoveredPct.toFixed(0)}%)
                   </div>
                   {hoveredRow.note && (
-                    <div className="mt-3 text-[14px] text-gray-300 leading-snug px-2">
+                    <div
+                      className="mt-2.5 text-[12px] text-gray-300 leading-snug px-1"
+                      style={{
+                        display: "-webkit-box",
+                        WebkitLineClamp: 3,
+                        WebkitBoxOrient: "vertical",
+                        overflow: "hidden",
+                      }}
+                    >
                       {hoveredRow.note}
                     </div>
                   )}
@@ -925,12 +948,12 @@ function SegmentedScoreRing({
                     Overall fit
                   </div>
                   <div
-                    className="text-8xl font-semibold tabular-nums leading-none"
+                    className="text-7xl font-semibold tabular-nums leading-none"
                     style={{ color: meta.color }}
                   >
                     {score}
                   </div>
-                  <div className="mt-2 text-[13px] uppercase tracking-[0.22em] font-mono text-gray-500">
+                  <div className="mt-2 text-[12px] uppercase tracking-[0.22em] font-mono text-gray-500">
                     / 100
                   </div>
                 </motion.div>

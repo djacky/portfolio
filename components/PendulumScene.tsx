@@ -1537,6 +1537,21 @@ export default function PendulumScene() {
         setTrainingDone(true);
         setShowToast(true);
         window.setTimeout(() => setShowToast(false), 4200);
+
+        /* Bump the global trainings counter once per browser.
+           Dedupe via localStorage so refreshes and re-mounts don't
+           inflate the count for a single visitor. */
+        try {
+          const KEY = "pendulum_counted_v1";
+          if (!window.localStorage.getItem(KEY)) {
+            window.localStorage.setItem(KEY, "1");
+            fetch("/api/stats/trainings", { method: "POST" }).catch(() => {
+              /* silent — counter is best-effort */
+            });
+          }
+        } catch {
+          /* localStorage unavailable (private mode etc.) — skip */
+        }
       }
     }, 150);
     return () => window.clearInterval(id);

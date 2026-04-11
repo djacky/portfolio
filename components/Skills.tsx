@@ -13,6 +13,7 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { Brain, Code2, Cloud, Cpu, Wrench, Move } from "lucide-react";
+import Typewriter from "./Typewriter";
 import Matter from "matter-js";
 
 /* =================== data =================== */
@@ -255,6 +256,11 @@ function NeuralGraph({ onHoverGroup }: { onHoverGroup: (i: number | null) => voi
 
     /* ---- mouse drag ---- */
     const mouse = Matter.Mouse.create(container);
+    // Allow page scrolling — detach wheel listeners that Matter.js adds
+    const mw = (mouse as any).mousewheel;
+    mouse.element.removeEventListener("mousewheel", mw);
+    mouse.element.removeEventListener("DOMMouseScroll", mw);
+    mouse.element.removeEventListener("wheel", mw);
     const mouseConstraint = Matter.MouseConstraint.create(engine, {
       mouse,
       constraint: {
@@ -496,7 +502,7 @@ function NeuralGraph({ onHoverGroup }: { onHoverGroup: (i: number | null) => voi
       style={{
         height: SANDBOX_H,
         contain: "layout paint style",
-        touchAction: "none",
+        touchAction: "pan-y",
       }}
     >
       {/* edge canvas */}
@@ -599,22 +605,33 @@ export default function Skills() {
     <section id="skills" className="relative mx-auto max-w-6xl px-6 py-24">
 
       <header className="relative mb-10">
-        <p className="text-xs uppercase tracking-[0.25em] text-accent2">
-          Stack
-        </p>
-        <h2 className="mt-2 text-4xl md:text-5xl font-semibold text-gradient">
-          The tools I reach for.
-        </h2>
-        <p className="mt-3 max-w-2xl text-sm text-gray-400">
-          Four capability pillars, connected. Drag a node and watch the network
-          respond.
-        </p>
+        <Typewriter
+          text="Stack"
+          as="p"
+          speed={60}
+          className="text-xs uppercase tracking-[0.25em] text-accent2"
+        />
+        <Typewriter
+          text="The tools I reach for."
+          as="h2"
+          speed={30}
+          delay={500}
+          showCursor={false}
+          className="mt-2 text-4xl md:text-5xl font-semibold text-gradient"
+        />
+        <Typewriter
+          text="Four capability pillars, connected. Drag a node and watch the network respond."
+          as="p"
+          speed={18}
+          delay={1200}
+          showCursor={false}
+          className="mt-3 max-w-2xl text-sm text-gray-400"
+        />
       </header>
 
       <motion.div
         initial={{ opacity: 0, y: 20 }}
-        whileInView={{ opacity: 1, y: 0 }}
-        viewport={{ once: true, margin: "-80px" }}
+        animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.6 }}
         className="relative"
       >
@@ -624,8 +641,7 @@ export default function Skills() {
       {/* tooling strip */}
       <motion.div
         initial={{ opacity: 0, y: 16 }}
-        whileInView={{ opacity: 1, y: 0 }}
-        viewport={{ once: true, margin: "-80px" }}
+        animate={{ opacity: 1, y: 0 }}
         transition={{ delay: 0.2 }}
         className="relative mt-8"
       >

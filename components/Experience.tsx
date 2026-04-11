@@ -9,7 +9,7 @@
  *  node to expand its detail panel below the graph.                   *
  * ------------------------------------------------------------------ */
 
-import { useState } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import dynamic from "next/dynamic";
 import {
@@ -21,6 +21,8 @@ import {
   ArrowUpRight,
   ChevronDown,
 } from "lucide-react";
+import { useNavigation } from "./SectionRouter";
+import Typewriter from "./Typewriter";
 
 const ExperienceScene3D = dynamic(() => import("./ExperienceScene"), { ssr: false });
 
@@ -148,6 +150,31 @@ const EDGES: Edge[] = [
 
 export default function Experience() {
   const [sel, setSel] = useState<number | null>(null);
+  const unhoverTimer = useRef<number | null>(null);
+  const { goTo } = useNavigation();
+
+  const handleHover = useCallback((i: number) => {
+    if (unhoverTimer.current !== null) {
+      window.clearTimeout(unhoverTimer.current);
+      unhoverTimer.current = null;
+    }
+    setSel(i);
+  }, []);
+
+  const handleUnhover = useCallback(() => {
+    if (unhoverTimer.current !== null) window.clearTimeout(unhoverTimer.current);
+    unhoverTimer.current = window.setTimeout(() => {
+      setSel(null);
+      unhoverTimer.current = null;
+    }, 400);
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (unhoverTimer.current !== null) window.clearTimeout(unhoverTimer.current);
+    },
+    [],
+  );
 
   const toggle = (i: number) => setSel(sel === i ? null : i);
 
@@ -155,17 +182,28 @@ export default function Experience() {
     <section id="experience" className="relative mx-auto max-w-5xl px-6 py-24">
       {/* Header */}
       <header className="mb-10">
-        <p className="text-xs uppercase tracking-[0.25em] text-accent2">
-          Experience
-        </p>
-        <h2 className="mt-2 text-4xl md:text-5xl font-semibold text-gradient">
-          A decade of production systems.
-        </h2>
-        <p className="mt-3 max-w-2xl text-sm text-gray-400">
-          From transistor-level mixed-signal at Apple to reinforcement learning
-          on a live EV fleet — every role has shipped to real hardware or real
-          users.
-        </p>
+        <Typewriter
+          text="Experience"
+          as="p"
+          speed={60}
+          className="text-xs uppercase tracking-[0.25em] text-accent2"
+        />
+        <Typewriter
+          text="A decade of production systems."
+          as="h2"
+          speed={30}
+          delay={600}
+          showCursor={false}
+          className="mt-2 text-4xl md:text-5xl font-semibold text-gradient"
+        />
+        <Typewriter
+          text="From transistor-level mixed-signal at Apple to reinforcement learning on a live EV fleet — every role has shipped to real hardware or real users."
+          as="p"
+          speed={18}
+          delay={1600}
+          showCursor={false}
+          className="mt-3 max-w-2xl text-sm text-gray-400"
+        />
       </header>
 
       {/* ── Desktop: 3D career graph ──────────────────────────── */}
@@ -174,10 +212,10 @@ export default function Experience() {
           <ExperienceScene3D
             jobs={JOBS}
             edges={EDGES}
-            selected={sel}
-            onSelect={toggle}
-            onClose={() => setSel(null)}
-            onMiss={() => setSel(null)}
+            hovered={sel}
+            onHover={handleHover}
+            onUnhover={handleUnhover}
+            onDemoClick={() => goTo("demos")}
           />
           <AnimatePresence>
             {sel === null && (
@@ -187,7 +225,7 @@ export default function Experience() {
                 exit={{ opacity: 0 }}
                 className="absolute bottom-2 left-1/2 -translate-x-1/2 text-[10px] font-mono uppercase tracking-[0.2em] text-gray-600 pointer-events-none z-10"
               >
-                click a node to explore · drag to orbit
+                hover a node to explore · drag to orbit
               </motion.p>
             )}
           </AnimatePresence>
@@ -221,6 +259,7 @@ function MobileCard({
   isOpen: boolean;
   onToggle: () => void;
 }) {
+  const { goTo } = useNavigation();
   const Icon = job.icon;
   return (
     <div
@@ -297,14 +336,15 @@ function MobileCard({
               </div>
 
               {job.demo && (
-                <a
-                  href={job.demo.href}
+                <button
+                  type="button"
+                  onClick={() => goTo("demos")}
                   className="mt-3 inline-flex items-center gap-1 text-[11px] font-medium"
                   style={{ color: job.tint }}
                 >
                   {job.demo.label}
                   <ArrowUpRight className="w-3 h-3" />
-                </a>
+                </button>
               )}
             </div>
           </motion.div>

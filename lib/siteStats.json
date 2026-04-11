@@ -1,0 +1,12 @@
+{
+  "publications": 22,
+  "citations": 357,
+  "hIndex": 9,
+  "i10Index": 9,
+  "reading": {
+    "title": "Diffusion Policy: Visuomotor Policy Learning via Action Diffusion",
+    "authors": "Chi et al.",
+    "link": "https://arxiv.org/abs/2303.04137"
+  },
+  "_note": "Single source of truth for hero rotation + Publications stats strip. Publication numbers: copy from https://scholar.google.com/citations?user=Fes_eScAAAAJ&hl=en whenever you want them refreshed. Reading: change the title/authors/link to whatever you're reading. Commit + push → Vercel redeploys in ~30s."
+}

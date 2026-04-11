@@ -1,21 +1,109 @@
 "use client";
 
-import { motion } from "framer-motion";
-import { ArrowRight, MessageSquare } from "lucide-react";
+import { useState, useEffect, useRef, type ReactNode } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+import { ArrowRight, MessageSquare, Github, Linkedin, Mail, BookOpen } from "lucide-react";
 import dynamic from "next/dynamic";
 import NeuralConstellation from "./NeuralConstellation";
 import { useContactDrawer } from "./ContactDrawer";
+import { useNavigation } from "./SectionRouter";
+import RollingTitle from "./RollingTitle";
+import type { SiteStats } from "@/lib/siteStats";
 
 // Lazy-load the R3F canvas so it never blocks first paint and the
 // heavy three.js bundle doesn't bloat the server render.
 const PendulumScene = dynamic(() => import("./PendulumScene"), { ssr: false });
 
+const STATIC_CREDENTIALS: ReactNode[] = [
+  "10+ yrs in R&D + production ML",
+  "Python · PyTorch · FastAPI · C++ · AWS",
+];
+
+const CREDENTIAL_HOLD = 3200;
+
+function formatInt(n: number): string {
+  return n.toLocaleString("en-US");
+}
+
+function buildCredentials(stats: SiteStats | null): ReactNode[] {
+  if (!stats) return STATIC_CREDENTIALS;
+  const live: ReactNode[] = [
+    `${stats.publications} publications · ${formatInt(stats.citations)} citations`,
+    `${formatInt(stats.trainings)} pendulums trained globally`,
+    <>
+      reading:{" "}
+      <a
+        href={stats.reading.link}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="text-accent2 hover:text-white underline-offset-2 hover:underline transition-colors pointer-events-auto"
+      >
+        {stats.reading.title}
+      </a>
+    </>,
+  ];
+  return [...STATIC_CREDENTIALS, ...live];
+}
+
+function FadingCredentials() {
+  const [stats, setStats] = useState<SiteStats | null>(null);
+  const [idx, setIdx] = useState(0);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  /* Fetch once on mount; failures fall back silently to the static list. */
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/stats");
+        if (!res.ok) return;
+        const data = (await res.json()) as SiteStats;
+        if (!cancelled) setStats(data);
+      } catch {
+        /* silent */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const credentials = buildCredentials(stats);
+
+  useEffect(() => {
+    timerRef.current = setInterval(() => {
+      setIdx((prev) => (prev + 1) % credentials.length);
+    }, CREDENTIAL_HOLD);
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+    };
+  }, [credentials.length]);
+
+  const safeIdx = idx % credentials.length;
+
+  return (
+    <AnimatePresence mode="wait">
+      <motion.span
+        key={safeIdx}
+        initial={{ opacity: 0, y: 6 }}
+        animate={{ opacity: 1, y: 0 }}
+        exit={{ opacity: 0, y: -6 }}
+        transition={{ duration: 0.45, ease: "easeInOut" }}
+        className="block text-sm font-mono uppercase tracking-[0.18em] text-gray-400"
+      >
+        <span className="text-accent2">◆</span> {credentials[safeIdx]}
+      </motion.span>
+    </AnimatePresence>
+  );
+}
+
 export default function Hero() {
   const { open: openContact } = useContactDrawer();
+  const { goTo } = useNavigation();
   return (
     <section
       id="top"
-      className="relative min-h-screen flex items-center overflow-hidden"
+      className="relative h-screen flex items-center overflow-hidden"
     >
       {/* interactive 3D pendulum — full bleed behind content, biased right */}
       <div
@@ -54,11 +142,11 @@ export default function Hero() {
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.1, duration: 0.6 }}
-          className="mt-5 text-5xl sm:text-6xl md:text-7xl font-semibold leading-[1.02] tracking-tight"
+          className="mt-5 text-4xl sm:text-5xl md:text-6xl font-semibold leading-[1.05] tracking-tight"
         >
           <span className="text-gradient">Achille Nicoletti</span>
           <br />
-          <span className="text-gray-300">Senior AI/ML Engineer.</span>
+          <RollingTitle className="text-gray-300" />
         </motion.h1>
 
         <motion.p
@@ -79,13 +167,14 @@ export default function Hero() {
           transition={{ delay: 0.3 }}
           className="mt-9 flex flex-wrap items-center gap-4 pointer-events-auto"
         >
-          <a
-            href="#demos"
+          <button
+            type="button"
+            onClick={() => goTo("demos")}
             className="group inline-flex items-center gap-2 rounded-full bg-accent px-5 py-3 text-sm font-medium text-white shadow-glow hover:bg-accent/90 transition-all"
           >
-            Try the live demos
+            Try live demos
             <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
-          </a>
+          </button>
           <button
             type="button"
             onClick={openContact}
@@ -95,36 +184,36 @@ export default function Hero() {
           </button>
         </motion.div>
 
-        {/* compact credential strip — no big glass tiles */}
+        {/* social links */}
+        <motion.div
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.4 }}
+          className="mt-6 flex items-center gap-5 pointer-events-auto"
+        >
+          <a href="https://github.com/djacky" target="_blank" rel="noopener noreferrer" aria-label="GitHub" className="text-gray-500 hover:text-white transition-colors">
+            <Github className="w-5 h-5" />
+          </a>
+          <a href="https://linkedin.com/in/achille-nicoletti" target="_blank" rel="noopener noreferrer" aria-label="LinkedIn" className="text-gray-500 hover:text-white transition-colors">
+            <Linkedin className="w-5 h-5" />
+          </a>
+          <a href="mailto:globalminimum@protonmail.com" aria-label="Email" className="text-gray-500 hover:text-white transition-colors">
+            <Mail className="w-5 h-5" />
+          </a>
+          <a href="https://scholar.google.com/citations?user=Fes_eScAAAAJ&hl=en" target="_blank" rel="noopener noreferrer" aria-label="Google Scholar" className="text-gray-500 hover:text-white transition-colors">
+            <BookOpen className="w-5 h-5" />
+          </a>
+        </motion.div>
+
+        {/* rotating credential */}
         <motion.div
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           transition={{ delay: 0.5 }}
-          className="mt-12 flex flex-wrap gap-x-6 gap-y-2 text-[11px] font-mono uppercase tracking-[0.18em] text-gray-500"
+          className="mt-12 h-7"
         >
-          <span>
-            <span className="text-accent2">◆</span> 10+ yrs shipping
-          </span>
-          <span>
-            <span className="text-accent2">◆</span> PPO · RL @ Eaton
-          </span>
-          <span>
-            <span className="text-accent2">◆</span> H∞ control @ CERN
-          </span>
-          <span>
-            <span className="text-accent2">◆</span> Python · PyTorch · C++ · AWS
-          </span>
+          <FadingCredentials />
         </motion.div>
-
-        {/* hint */}
-        <motion.p
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 0.7 }}
-          transition={{ delay: 1.2, duration: 1.2 }}
-          className="mt-16 text-[10px] font-mono uppercase tracking-[0.25em] text-gray-600"
-        >
-          ↳ grab the pendulum — teach it to swing up
-        </motion.p>
       </div>
     </section>
   );
