@@ -58,6 +58,19 @@ export default function TickerNav() {
       transition={{ duration: 0.4 }}
       className="fixed top-5 left-0 right-0 z-50 h-10 flex items-center"
     >
+
+      {/* right side: contact + home */}
+      <div className="shrink-0 flex items-center gap-2 px-3">
+        <button
+          type="button"
+          onClick={() => goTo("hero")}
+          aria-label="Home"
+          className="flex items-center justify-center w-6 h-6 rounded text-gray-500 hover:text-accent2 transition-colors"
+        >
+          <Home className="w-4 h-4" />
+        </button>
+      </div>
+
       {/* ticker area */}
       <div
         className="flex-1 overflow-hidden relative group"
@@ -79,7 +92,6 @@ export default function TickerNav() {
         </div>
       </div>
 
-      {/* right side: contact + home */}
       <div className="shrink-0 flex items-center gap-2 px-3">
         <button
           type="button"
@@ -88,14 +100,6 @@ export default function TickerNav() {
         >
           <MessageSquare className="w-3 h-3" />
           <span className="hidden sm:inline">Contact</span>
-        </button>
-        <button
-          type="button"
-          onClick={() => goTo("hero")}
-          aria-label="Home"
-          className="flex items-center justify-center w-6 h-6 rounded text-gray-500 hover:text-accent2 transition-colors"
-        >
-          <Home className="w-3.5 h-3.5" />
         </button>
       </div>
     </motion.nav>

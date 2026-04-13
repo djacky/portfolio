@@ -42,7 +42,27 @@
       "Bash(node node_modules/typescript/bin/tsc --noEmit)",
       "Bash(echo \"EXIT=$?\")",
       "Bash(node node_modules/typescript/lib/tsc.js --noEmit)",
-      "Bash(echo \"exit: $?\")"
+      "Bash(echo \"exit: $?\")",
+      "Bash(pip install:*)",
+      "Bash(curl -s -L -o /tmp/paper.html \"https://link.springer.com/article/10.1007/s42452-024-05690-y\")",
+      "Read(//tmp/**)",
+      "WebFetch(domain:cranfield.pure.elsevier.com)",
+      "Bash(python:*)",
+      "WebFetch(domain:ui.adsabs.harvard.edu)",
+      "WebFetch(domain:cranfield.elsevierpure.com)",
+      "WebFetch(domain:doi.org)",
+      "Bash(python3 -c ':*)",
+      "WebFetch(domain:linkinghub.elsevier.com)",
+      "WebFetch(domain:www.researchgate.net)",
+      "Bash(python3:*)",
+      "WebFetch(domain:www.cranfield.ac.uk)",
+      "WebFetch(domain:www.nature.com)",
+      "WebFetch(domain:dspace.lib.cranfield.ac.uk)",
+      "WebFetch(domain:ieeexplore.ieee.org)",
+      "Bash(node scripts/test-dqn-curriculum.mjs)",
+      "Bash(curl:*)",
+      "Bash(powershell:*)",
+      "Bash(node scripts/test-ppo-convergence.mjs)"
     ]
   }
 }

@@ -210,7 +210,7 @@ export default function Hero() {
           <a href="https://github.com/djacky" target="_blank" rel="noopener noreferrer" aria-label="GitHub" className="text-gray-500 hover:text-white transition-colors">
             <Github className="w-5 h-5" />
           </a>
-          <a href="https://linkedin.com/in/achille-nicoletti" target="_blank" rel="noopener noreferrer" aria-label="LinkedIn" className="text-gray-500 hover:text-white transition-colors">
+          <a href="https://www.linkedin.com/in/achillen/" target="_blank" rel="noopener noreferrer" aria-label="LinkedIn" className="text-gray-500 hover:text-white transition-colors">
             <Linkedin className="w-5 h-5" />
           </a>
           <a href="mailto:globalminimum@protonmail.com" aria-label="Email" className="text-gray-500 hover:text-white transition-colors">
