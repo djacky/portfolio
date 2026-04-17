@@ -15,24 +15,40 @@ import * as THREE from "three";
 const COLOR_ROD = new THREE.Color("#22d3ee");
 const COLOR_BOB = new THREE.Color("#7c5cff");
 const COLOR_GOLD = new THREE.Color("#fbbf24");
+const COLOR_JOINT = new THREE.Color("#a0aec0");
+const HEAT_COLD = new THREE.Color("#3b82f6");
+const HEAT_HOT = new THREE.Color("#ef4444");
 
-const PEND_OFFSET_X = 1.8;
-const PEND_OFFSET_Y = 0.9;
+const PEND_OFFSET_X = 2.3;
+const PEND_OFFSET_Y = 0.6;
+
+type PendubotMode = "full" | "partial";
+const PENDUBOT_MODE: PendubotMode = "full";
 
 /* ================================================================
-   Physics — single rigid-rod pendulum (OpenAI Gym Pendulum-v1)
-   θ̈ = (3g/2L)·sin(θ) + (3/mL²)·τ
-   θ = 0 is upright (unstable), θ = π is hanging (stable).
+   Physics — double pendulum (pendubot)
+   Only joint 1 is actuated. θ=0 is upright (unstable), θ=π hanging.
+   Lagrangian EOM with mass matrix inversion, RK4 integration.
 ================================================================ */
 const G_PHYS = 10;
-const MASS = 1;
-const LEN = 1;
-const MAX_TORQUE = 2;
+const M1 = 1, M2 = 0.5;
+const L1 = 0.6, L2 = 0.6;
+const LC1 = L1 / 2, LC2 = L2 / 2;
+const I1 = M1 * L1 * L1 / 12, I2 = M2 * L2 * L2 / 12;
+const MAX_TORQUE = 15;
 const DT = 0.05;
-const MAX_SPEED = 8;
+const MAX_SPEED = 15;
+const DAMP1 = 0;
+const DAMP2 = 0;
 const EP_LEN = 200;
 
-type PendState = { th: number; w: number };
+const _D1 = M1 * LC1 * LC1 + I1 + M2 * L1 * L1;
+const _D2 = M2 * LC2 * LC2 + I2;
+const _H = M2 * L1 * LC2;
+const _G1 = (M1 * LC1 + M2 * L1) * G_PHYS;
+const _G2 = M2 * LC2 * G_PHYS;
+
+type PendState = { t1: number; w1: number; t2: number; w2: number };
 
 function wrap(a: number): number {
   let x = (a + Math.PI) % (2 * Math.PI);
@@ -40,29 +56,61 @@ function wrap(a: number): number {
   return x - Math.PI;
 }
 
-function pendDeriv(th: number, w: number, u: number): [number, number] {
-  return [w, (3 * G_PHYS) / (2 * LEN) * Math.sin(th) + 3 / (MASS * LEN * LEN) * u];
+function pendDeriv(t1: number, w1: number, t2: number, w2: number, u: number): [number, number, number, number] {
+  const d = t1 - t2, cd = Math.cos(d), sd = Math.sin(d);
+  const relW = w2 - w1;
+  const f1 = u - DAMP1 * w1 + DAMP2 * relW - _H * sd * w2 * w2 + _G1 * Math.sin(t1);
+  const f2 = -DAMP2 * relW + _H * sd * w1 * w1 + _G2 * Math.sin(t2);
+  const det = _D1 * _D2 - _H * _H * cd * cd;
+  return [w1, (_D2 * f1 - _H * cd * f2) / det, w2, (_D1 * f2 - _H * cd * f1) / det];
 }
 
-function stepPend(s: PendState, u: number, dt: number = DT): PendState {
-  const k1 = pendDeriv(s.th, s.w, u);
-  const k2 = pendDeriv(s.th + k1[0] * dt / 2, s.w + k1[1] * dt / 2, u);
-  const k3 = pendDeriv(s.th + k2[0] * dt / 2, s.w + k2[1] * dt / 2, u);
-  const k4 = pendDeriv(s.th + k3[0] * dt, s.w + k3[1] * dt, u);
+function stepPend(s: PendState, u: number): PendState {
+  const { t1, w1, t2, w2 } = s;
+  const k1 = pendDeriv(t1, w1, t2, w2, u);
+  const k2 = pendDeriv(t1 + k1[0] * DT / 2, w1 + k1[1] * DT / 2, t2 + k1[2] * DT / 2, w2 + k1[3] * DT / 2, u);
+  const k3 = pendDeriv(t1 + k2[0] * DT / 2, w1 + k2[1] * DT / 2, t2 + k2[2] * DT / 2, w2 + k2[3] * DT / 2, u);
+  const k4 = pendDeriv(t1 + k3[0] * DT, w1 + k3[1] * DT, t2 + k3[2] * DT, w2 + k3[3] * DT, u);
   return {
-    th: s.th + (k1[0] + 2 * k2[0] + 2 * k3[0] + k4[0]) * dt / 6,
-    w: Math.max(-MAX_SPEED, Math.min(MAX_SPEED,
-      s.w + (k1[1] + 2 * k2[1] + 2 * k3[1] + k4[1]) * dt / 6)),
+    t1: t1 + (k1[0] + 2 * k2[0] + 2 * k3[0] + k4[0]) * DT / 6,
+    w1: Math.max(-MAX_SPEED, Math.min(MAX_SPEED, w1 + (k1[1] + 2 * k2[1] + 2 * k3[1] + k4[1]) * DT / 6)),
+    t2: t2 + (k1[2] + 2 * k2[2] + 2 * k3[2] + k4[2]) * DT / 6,
+    w2: Math.max(-MAX_SPEED, Math.min(MAX_SPEED, w2 + (k1[3] + 2 * k2[3] + 2 * k3[3] + k4[3]) * DT / 6)),
   };
 }
 
 function getObs(s: PendState): Float64Array {
-  return Float64Array.of(Math.cos(s.th), Math.sin(s.th), s.w / MAX_SPEED);
+  return Float64Array.of(
+    Math.cos(s.t1), Math.sin(s.t1), s.w1 / MAX_SPEED,
+    Math.cos(s.t2), Math.sin(s.t2), s.w2 / MAX_SPEED,
+  );
 }
 
 function pendReward(s: PendState, u: number): number {
-  const th = wrap(s.th);
-  return -(th * th + 0.1 * s.w * s.w + 0.001 * u * u);
+  const upright = PENDUBOT_MODE === "full"
+    ? (Math.cos(s.t1) + 1) / 2 * (Math.cos(s.t2) + 1) / 2
+    : (-Math.cos(s.t1) + 1) / 2 * (Math.cos(s.t2) + 1) / 2;
+  return upright - 0.002 * (s.w1 * s.w1 + s.w2 * s.w2) - 0.001 * u * u;
+}
+
+function inverseDynJ1(prev: PendState, next: PendState, dt: number): number {
+  const alpha1 = (next.w1 - prev.w1) / dt;
+  const alpha2 = (next.w2 - prev.w2) / dt;
+  const d = prev.t1 - prev.t2, cd = Math.cos(d), sd = Math.sin(d);
+  const relW = prev.w2 - prev.w1;
+  const rest = -DAMP1 * prev.w1 + DAMP2 * relW - _H * sd * prev.w2 * prev.w2 + _G1 * Math.sin(prev.t1);
+  return _D1 * alpha1 + _H * cd * alpha2 - rest;
+}
+
+function nearestActionIdx(torque: number): number {
+  const c = Math.max(-MAX_TORQUE, Math.min(MAX_TORQUE, torque));
+  return Math.round((c + MAX_TORQUE) * (N_ACTIONS - 1) / (2 * MAX_TORQUE));
+}
+
+function invertedHeat(s: PendState): number {
+  return PENDUBOT_MODE === "full"
+    ? (Math.cos(s.t1) + 1) / 2 * (Math.cos(s.t2) + 1) / 2
+    : (-Math.cos(s.t1) + 1) / 2 * (Math.cos(s.t2) + 1) / 2;
 }
 
 /* ================================================================
@@ -83,28 +131,28 @@ function seededGauss(rng: () => number): number {
 }
 
 /* ================================================================
-   DQN — Deep Q-Network for pendulum swing-up + balance
-   Network: [3] → 32 → ReLU → 32 → ReLU → 7 Q-values
+   DQN — Deep Q-Network for pendubot balance
+   Network: [6] → 64 → ReLU → 64 → ReLU → 21 Q-values
    Learns online from actual visible pendulum transitions.
 ================================================================ */
-const OBS_DIM = 3;
-const N_ACTIONS = 7;
+const OBS_DIM = 6;
+const N_ACTIONS = 21;
 const ACTION_TORQUES = Float64Array.from(
   { length: N_ACTIONS }, (_, i) => -MAX_TORQUE + (2 * MAX_TORQUE / (N_ACTIONS - 1)) * i,
 );
-const DQN_HIDDEN = 32;
-const REPLAY_CAP = 20000;
+const DQN_HIDDEN = 64;
+const REPLAY_CAP = 50000;
 const BATCH_SIZE = 32;
-const UPDATES_PER_STEP = 8;
+const UPDATES_PER_STEP = 16;
 const DQN_LR = 0.003;
 const GAMMA = 0.99;
 const EPS_START = 1.0;
 const EPS_END = 0.01;
-const EPS_DECAY = 2000;
-const TARGET_TAU = 0.005;
+const EPS_DECAY = 3000;
+const TARGET_TAU = 0.008;
 const MIN_REPLAY = 200;
-const REWARD_SCALE = 0.1;
-const CONVERGE_FRAC = 0.70;
+const REWARD_SCALE = 1.0;
+const CONVERGE_FRAC = 0.50;
 const CONVERGE_HOLD = 3;
 const MIN_CONVERGE_STEPS = 1000;
 const PLOT_WINDOW = 40;
@@ -243,6 +291,9 @@ class DQNAgent {
   private convCount = 0;
   trainingActive = false;
   stats: TrainStats = { ...INIT_STATS };
+  private bestNet: DQNNet | null = null;
+  private bestUprightSnapshot = 0;
+  private degradeCount = 0;
 
   private visSteps = 0;
   private visRewardAcc = 0;
@@ -252,6 +303,7 @@ class DQNAgent {
 
   plotRewardHistory: number[] = [];
   plotUprightHistory: number[] = [];
+  plotEpsilonHistory: number[] = [];
   private plotSteps = 0;
   private plotRewardAcc = 0;
   private plotUprightAcc = 0;
@@ -263,6 +315,10 @@ class DQNAgent {
     this.targetNet = new DQNNet(() => 0);
     this.targetNet.copyFrom(this.onlineNet);
     this.replay = new Float64Array(REPLAY_CAP * this.stride);
+  }
+
+  injectDemo(o: Float64Array, a: number, r: number, n: Float64Array) {
+    this.pushReplay(o, a, r, n);
   }
 
   private pushReplay(o: Float64Array, a: number, r: number, n: Float64Array) {
@@ -301,7 +357,9 @@ class DQNAgent {
       this.targetNet.softUpdate(this.onlineNet, TARGET_TAU);
     }
 
-    const isUp = Math.abs(wrap(next.th)) < 0.3 && Math.abs(next.w) < 1;
+    const t1Goal = PENDUBOT_MODE === "full" ? 0 : Math.PI;
+    const isUp = Math.abs(wrap(next.t1 - t1Goal)) < 0.3 && Math.abs(wrap(next.t2)) < 0.3
+              && Math.abs(next.w1) < 2 && Math.abs(next.w2) < 2;
 
     this.plotRewardAcc += rawR;
     if (isUp) this.plotUprightAcc++;
@@ -309,6 +367,7 @@ class DQNAgent {
     if (this.plotSteps >= PLOT_WINDOW) {
       this.plotRewardHistory.push(this.plotRewardAcc / PLOT_WINDOW);
       this.plotUprightHistory.push(this.plotUprightAcc / PLOT_WINDOW);
+      this.plotEpsilonHistory.push(this.epsilon);
       this.plotRewardAcc = 0;
       this.plotUprightAcc = 0;
       this.plotSteps = 0;
@@ -323,6 +382,21 @@ class DQNAgent {
       this.rewardHistory.push(epR);
       this.uprightHistory.push(epUp);
       this.bestUpright = Math.max(this.bestUpright, epUp);
+      if (epUp > this.bestUprightSnapshot && epUp >= CONVERGE_FRAC) {
+        this.bestUprightSnapshot = epUp;
+        if (!this.bestNet) this.bestNet = new DQNNet(() => 0);
+        this.bestNet.copyFrom(this.onlineNet);
+      }
+      if (this.converged && this.bestNet && epUp < 0.2) {
+        this.degradeCount++;
+        if (this.degradeCount >= 3) {
+          this.onlineNet.copyFrom(this.bestNet);
+          this.targetNet.copyFrom(this.bestNet);
+          this.degradeCount = 0;
+        }
+      } else if (this.converged && epUp >= CONVERGE_FRAC) {
+        this.degradeCount = 0;
+      }
       this.visRewardWindow.push(epR);
       this.visUprightWindow.push(epUp);
       if (this.visRewardWindow.length > 10) this.visRewardWindow.shift();
@@ -363,8 +437,6 @@ class DQNAgent {
     this.visUprightAcc = 0;
   }
 
-  runBgSteps() { /* DQN learns inline via recordVisibleStep */ }
-
   refreshStats() {
     const meanR = this.visRewardWindow.length > 0
       ? this.visRewardWindow.reduce((a, b) => a + b, 0) / this.visRewardWindow.length : 0;
@@ -375,6 +447,57 @@ class DQNAgent {
       bestUpright: this.bestUpright, epsilon: this.epsilon,
       converged: this.converged, trainingActive: this.trainingActive,
     };
+  }
+}
+
+/* ================================================================
+   Engine singleton — persists across Hero mount/unmount cycles.
+   When the Canvas unmounts (user navigates away), a background
+   setInterval continues physics + DQN training at ~20 Hz.
+================================================================ */
+type PendulumEngine = {
+  agent: DQNAgent;
+  env: PendState;
+  trainingStarted: boolean;
+  trainingStartTime: number;
+  convergenceCounted: boolean;
+  bgTimer: ReturnType<typeof setInterval> | null;
+};
+
+let _engine: PendulumEngine | null = null;
+
+function getEngine(): PendulumEngine {
+  if (!_engine) {
+    _engine = {
+      agent: new DQNAgent(),
+      env: {
+        t1: Math.PI + (Math.random() - 0.5) * 0.3, w1: 0,
+        t2: Math.PI + (Math.random() - 0.5) * 0.3, w2: 0,
+      },
+      trainingStarted: false,
+      trainingStartTime: 0,
+      convergenceCounted: false,
+      bgTimer: null,
+    };
+  }
+  return _engine;
+}
+
+function startBackground(engine: PendulumEngine) {
+  if (engine.bgTimer || !engine.agent.trainingActive) return;
+  engine.bgTimer = setInterval(() => {
+    const prev = { ...engine.env };
+    const { action: torque } = engine.agent.act(getObs(prev), engine.agent.converged);
+    engine.env = stepPend(prev, torque);
+    engine.agent.recordVisibleStep(prev, torque, engine.env);
+    engine.agent.refreshStats();
+  }, 50);
+}
+
+function stopBackground(engine: PendulumEngine) {
+  if (engine.bgTimer) {
+    clearInterval(engine.bgTimer);
+    engine.bgTimer = null;
   }
 }
 
@@ -397,8 +520,37 @@ function setRod(mesh: THREE.Mesh, a: THREE.Vector3, b: THREE.Vector3) {
   mesh.quaternion.copy(_q);
 }
 
-function bobPos(s: PendState): THREE.Vector3 {
-  return new THREE.Vector3(LEN * Math.sin(s.th), LEN * Math.cos(s.th), 0);
+function joint1Pos(s: PendState): THREE.Vector3 {
+  return new THREE.Vector3(L1 * Math.sin(s.t1), L1 * Math.cos(s.t1), 0);
+}
+
+function tipPos(s: PendState): THREE.Vector3 {
+  return new THREE.Vector3(
+    L1 * Math.sin(s.t1) + L2 * Math.sin(s.t2),
+    L1 * Math.cos(s.t1) + L2 * Math.cos(s.t2),
+    0,
+  );
+}
+
+function solveIK(px: number, py: number, prevT1: number): { t1: number; t2: number } {
+  const d2 = px * px + py * py;
+  const d = Math.sqrt(d2);
+  if (d >= L1 + L2) {
+    const angle = Math.atan2(px, py);
+    return { t1: angle, t2: angle };
+  }
+  if (d < 0.01) return { t1: prevT1, t2: prevT1 + Math.PI };
+  const cosPhi = (d2 - L1 * L1 - L2 * L2) / (2 * L1 * L2);
+  const phi = Math.acos(Math.max(-1, Math.min(1, cosPhi)));
+  const A = L1 + L2 * Math.cos(phi);
+  const B = L2 * Math.sin(phi);
+  const t1a = Math.atan2(A * px + B * py, A * py - B * px);
+  const t2a = t1a - phi;
+  const t1b = Math.atan2(A * px - B * py, A * py + B * px);
+  const t2b = t1b + phi;
+  return Math.abs(wrap(t1a - prevT1)) <= Math.abs(wrap(t1b - prevT1))
+    ? { t1: t1a, t2: t2a }
+    : { t1: t1b, t2: t2b };
 }
 
 function makeGlowTexture(): THREE.Texture {
@@ -419,17 +571,22 @@ function makeGlowTexture(): THREE.Texture {
 }
 
 /* ================================================================
-   PendulumMesh — single rod + bob with glow + trail
+   PendulumMesh — double pendulum with heat indicator on tip bob
 ================================================================ */
 function PendulumMesh({
   envRef,
   convergedRef,
+  grabActiveRef,
 }: {
   envRef: MutableRefObject<PendState>;
   convergedRef: MutableRefObject<boolean>;
+  grabActiveRef: MutableRefObject<boolean>;
 }) {
-  const rodRef = useRef<THREE.Mesh>(null);
-  const rodCoreRef = useRef<THREE.Mesh>(null);
+  const rod1Ref = useRef<THREE.Mesh>(null);
+  const rod1CoreRef = useRef<THREE.Mesh>(null);
+  const rod2Ref = useRef<THREE.Mesh>(null);
+  const rod2CoreRef = useRef<THREE.Mesh>(null);
+  const jointRef = useRef<THREE.Mesh>(null);
   const bobGroupRef = useRef<THREE.Group>(null);
   const bobMeshRef = useRef<THREE.Mesh>(null);
   const bobRingRef = useRef<THREE.Mesh>(null);
@@ -437,24 +594,36 @@ function PendulumMesh({
   const trailRef = useRef<THREE.Vector3[]>([]);
   const trailGeoRef = useRef<THREE.BufferGeometry>(null);
   const goldRef = useRef(0);
+  const smoothHeat = useRef(0);
   const glowTex = useMemo(() => makeGlowTexture(), []);
+  const _heatC = useMemo(() => new THREE.Color(), []);
   const TRAIL_LEN = 72;
 
   useFrame((_, dt) => {
     const s = envRef.current;
-    const bob = bobPos(s);
     const pivot = new THREE.Vector3(0, 0, 0);
+    const j1 = joint1Pos(s);
+    const tip = tipPos(s);
 
-    if (rodRef.current) setRod(rodRef.current, pivot, bob);
-    if (rodCoreRef.current) setRod(rodCoreRef.current, pivot, bob);
-    if (bobGroupRef.current) bobGroupRef.current.position.copy(bob);
+    if (rod1Ref.current) setRod(rod1Ref.current, pivot, j1);
+    if (rod1CoreRef.current) setRod(rod1CoreRef.current, pivot, j1);
+    if (rod2Ref.current) setRod(rod2Ref.current, j1, tip);
+    if (rod2CoreRef.current) setRod(rod2CoreRef.current, j1, tip);
+    if (jointRef.current) jointRef.current.position.copy(j1);
+    if (bobGroupRef.current) bobGroupRef.current.position.copy(tip);
     if (bobRingRef.current) bobRingRef.current.rotation.z -= dt * 0.5;
 
-    const target = convergedRef.current ? 1 : 0;
+    const goldTarget = convergedRef.current ? 1 : 0;
     const k = 1 - Math.exp(-dt * 2.2);
-    goldRef.current += (target - goldRef.current) * k;
+    goldRef.current += (goldTarget - goldRef.current) * k;
     const g = goldRef.current;
     const pulse = 0.9 + Math.sin(performance.now() * 0.0042) * 0.18;
+
+    const grabbing = grabActiveRef.current;
+    const rawHeat = invertedHeat(s);
+    smoothHeat.current += (rawHeat - smoothHeat.current) * Math.min(1, dt * 8);
+    const heat = smoothHeat.current;
+    const heatPulse = 0.85 + Math.sin(performance.now() * 0.005) * 0.25;
 
     const lerpMat = (mesh: THREE.Mesh | null, base: THREE.Color, emI: number) => {
       if (!mesh) return;
@@ -463,18 +632,48 @@ function PendulumMesh({
       mat.emissive.copy(base).lerp(COLOR_GOLD, g);
       mat.emissiveIntensity = emI + g * 0.6 * pulse;
     };
-    lerpMat(rodRef.current, COLOR_ROD, 0.35);
-    lerpMat(bobMeshRef.current, COLOR_BOB, 1.4);
+    lerpMat(rod1Ref.current, COLOR_ROD, 0.35);
+    lerpMat(rod2Ref.current, COLOR_ROD, 0.35);
 
-    if (rodCoreRef.current)
-      (rodCoreRef.current.material as THREE.MeshBasicMaterial).color.copy(COLOR_ROD).lerp(COLOR_GOLD, g);
+    if (rod1CoreRef.current)
+      (rod1CoreRef.current.material as THREE.MeshBasicMaterial).color.copy(COLOR_ROD).lerp(COLOR_GOLD, g);
+    if (rod2CoreRef.current)
+      (rod2CoreRef.current.material as THREE.MeshBasicMaterial).color.copy(COLOR_ROD).lerp(COLOR_GOLD, g);
 
-    if (bobGlowRef.current) {
-      (bobGlowRef.current.material as THREE.SpriteMaterial).color.copy(COLOR_BOB).lerp(COLOR_GOLD, g);
-      bobGlowRef.current.scale.setScalar(1.2 * (1 + Math.sin(performance.now() * 0.0032) * 0.06));
+    if (jointRef.current) {
+      const jm = jointRef.current.material as THREE.MeshPhysicalMaterial;
+      jm.color.copy(COLOR_JOINT).lerp(COLOR_GOLD, g);
+      jm.emissive.copy(COLOR_JOINT).lerp(COLOR_GOLD, g);
+      jm.emissiveIntensity = 0.15 + g * 0.4;
     }
 
-    trailRef.current.push(bob.clone());
+    if (bobMeshRef.current) {
+      const mat = bobMeshRef.current.material as THREE.MeshPhysicalMaterial;
+      if (grabbing && !convergedRef.current) {
+        _heatC.copy(HEAT_COLD).lerp(HEAT_HOT, heat);
+        mat.color.copy(_heatC);
+        mat.emissive.copy(_heatC);
+        mat.emissiveIntensity = 1.6 * heatPulse;
+      } else {
+        mat.color.copy(COLOR_BOB).lerp(COLOR_GOLD, g);
+        mat.emissive.copy(COLOR_BOB).lerp(COLOR_GOLD, g);
+        mat.emissiveIntensity = 1.4 + g * 0.6 * pulse;
+      }
+    }
+
+    if (bobGlowRef.current) {
+      const gm = bobGlowRef.current.material as THREE.SpriteMaterial;
+      if (grabbing && !convergedRef.current) {
+        _heatC.copy(HEAT_COLD).lerp(HEAT_HOT, heat);
+        gm.color.copy(_heatC);
+        bobGlowRef.current.scale.setScalar(1.4 * heatPulse);
+      } else {
+        gm.color.copy(COLOR_BOB).lerp(COLOR_GOLD, g);
+        bobGlowRef.current.scale.setScalar(1.2 * (1 + Math.sin(performance.now() * 0.0032) * 0.06));
+      }
+    }
+
+    trailRef.current.push(tip.clone());
     if (trailRef.current.length > TRAIL_LEN) trailRef.current.shift();
     const geo = trailGeoRef.current;
     if (geo) {
@@ -515,27 +714,40 @@ function PendulumMesh({
         <sphereGeometry args={[0.09, 24, 24]} />
         <meshPhysicalMaterial color="#e8ecf5" metalness={1} roughness={0.15} clearcoat={1} clearcoatRoughness={0.1} emissive="#ffffff" emissiveIntensity={0.35} />
       </mesh>
-      {/* rod outer */}
-      <mesh ref={rodRef}>
-        <cylinderGeometry args={[0.05, 0.06, 1, 18]} />
+      {/* rod 1 */}
+      <mesh ref={rod1Ref}>
+        <cylinderGeometry args={[0.045, 0.055, 1, 18]} />
         <meshPhysicalMaterial color="#22d3ee" emissive="#22d3ee" emissiveIntensity={0.35} metalness={0.6} roughness={0.2} clearcoat={0.9} clearcoatRoughness={0.15} />
       </mesh>
-      {/* rod inner glow core */}
-      <mesh ref={rodCoreRef}>
-        <cylinderGeometry args={[0.018, 0.018, 1.01, 10]} />
+      <mesh ref={rod1CoreRef}>
+        <cylinderGeometry args={[0.016, 0.016, 1.01, 10]} />
         <meshBasicMaterial color="#22d3ee" toneMapped={false} />
       </mesh>
-      {/* bob assembly */}
+      {/* joint between links */}
+      <mesh ref={jointRef}>
+        <sphereGeometry args={[0.065, 20, 20]} />
+        <meshPhysicalMaterial color="#a0aec0" metalness={0.95} roughness={0.15} clearcoat={1} clearcoatRoughness={0.1} emissive="#a0aec0" emissiveIntensity={0.15} />
+      </mesh>
+      {/* rod 2 */}
+      <mesh ref={rod2Ref}>
+        <cylinderGeometry args={[0.045, 0.055, 1, 18]} />
+        <meshPhysicalMaterial color="#22d3ee" emissive="#22d3ee" emissiveIntensity={0.35} metalness={0.6} roughness={0.2} clearcoat={0.9} clearcoatRoughness={0.15} />
+      </mesh>
+      <mesh ref={rod2CoreRef}>
+        <cylinderGeometry args={[0.016, 0.016, 1.01, 10]} />
+        <meshBasicMaterial color="#22d3ee" toneMapped={false} />
+      </mesh>
+      {/* tip bob */}
       <group ref={bobGroupRef}>
         <sprite ref={bobGlowRef}>
           <spriteMaterial map={glowTex} color="#7c5cff" transparent depthWrite={false} blending={THREE.AdditiveBlending} toneMapped={false} />
         </sprite>
         <mesh ref={bobRingRef}>
-          <torusGeometry args={[0.19, 0.009, 12, 48]} />
+          <torusGeometry args={[0.17, 0.008, 12, 48]} />
           <meshBasicMaterial color="#7c5cff" toneMapped={false} />
         </mesh>
         <mesh ref={bobMeshRef}>
-          <sphereGeometry args={[0.14, 28, 28]} />
+          <sphereGeometry args={[0.12, 28, 28]} />
           <meshPhysicalMaterial color="#7c5cff" emissive="#7c5cff" emissiveIntensity={1.4} metalness={0.7} roughness={0.15} clearcoat={1} clearcoatRoughness={0.08} />
         </mesh>
       </group>
@@ -549,7 +761,7 @@ function PendulumMesh({
 }
 
 /* ================================================================
-   GrabPlane — invisible plane catching pointer events for the bob
+   GrabPlane — catches pointer events for the tip bob
 ================================================================ */
 type GrabState = { active: boolean; wx: number; wy: number };
 
@@ -565,8 +777,8 @@ function GrabPlane({
       onPointerDown={(e) => {
         const lx = e.point.x - PEND_OFFSET_X;
         const ly = e.point.y - PEND_OFFSET_Y;
-        const bob = bobPos(envRef.current);
-        if (Math.hypot(lx - bob.x, ly - bob.y) > 0.4) return;
+        const tip = tipPos(envRef.current);
+        if (Math.hypot(lx - tip.x, ly - tip.y) > 0.35) return;
         e.stopPropagation();
         grabRef.current = { active: true, wx: lx, wy: ly };
         (e.target as Element)?.setPointerCapture?.(e.pointerId);
@@ -605,44 +817,67 @@ function PivotProjector({ onPosition }: { onPosition: (p: { x: number; y: number
 }
 
 /* ================================================================
-   SceneRunner — game loop: visible env + background PPO training
+   SceneRunner — game loop with IK grab + double pendulum physics
 ================================================================ */
 function SceneRunner({
   agentRef,
   visibleEnvRef,
   convergedRef,
   grabRef,
+  grabActiveRef,
   statsRef,
   onFirstRelease,
 }: {
-  agentRef: MutableRefObject<DQNAgent | null>;
+  agentRef: MutableRefObject<DQNAgent>;
   visibleEnvRef: MutableRefObject<PendState>;
   convergedRef: MutableRefObject<boolean>;
   grabRef: MutableRefObject<GrabState>;
+  grabActiveRef: MutableRefObject<boolean>;
   statsRef: MutableRefObject<TrainStats>;
   onFirstRelease: () => void;
 }) {
   const wasGrabRef = useRef(false);
-  const prevGrabAngle = useRef(0);
-  const grabVelRef = useRef(0);
+  const prevT1Ref = useRef(Math.PI);
+  const prevT2Ref = useRef(Math.PI);
+  const grabVel1Ref = useRef(0);
+  const grabVel2Ref = useRef(0);
   const accumRef = useRef(0);
   const physRef = useRef<PendState>({ ...visibleEnvRef.current });
   const physPrevRef = useRef<PendState>({ ...visibleEnvRef.current });
 
   useFrame((_, delta) => {
     const agent = agentRef.current;
-    if (!agent) return;
 
     const nowGrab = grabRef.current.active;
+    grabActiveRef.current = nowGrab;
+
     if (nowGrab) {
-      if (!wasGrabRef.current) agent.resetVisibleEpisode();
+      if (!wasGrabRef.current) {
+        agent.resetVisibleEpisode();
+        prevT1Ref.current = physRef.current.t1;
+        prevT2Ref.current = physRef.current.t2;
+      }
       wasGrabRef.current = true;
       const { wx, wy } = grabRef.current;
-      const newAngle = Math.atan2(wx, wy);
+      const ik = solveIK(wx, wy, prevT1Ref.current);
       const frameDt = Math.min(delta, 0.05);
-      if (frameDt > 0) grabVelRef.current = wrap(newAngle - prevGrabAngle.current) / frameDt;
-      prevGrabAngle.current = newAngle;
-      const gs = { th: newAngle, w: grabVelRef.current };
+      const prevGrabState: PendState = {
+        t1: prevT1Ref.current, w1: grabVel1Ref.current,
+        t2: prevT2Ref.current, w2: grabVel2Ref.current,
+      };
+      if (frameDt > 0) {
+        grabVel1Ref.current = wrap(ik.t1 - prevT1Ref.current) / frameDt;
+        grabVel2Ref.current = wrap(ik.t2 - prevT2Ref.current) / frameDt;
+      }
+      prevT1Ref.current = ik.t1;
+      prevT2Ref.current = ik.t2;
+      const gs: PendState = { t1: ik.t1, w1: grabVel1Ref.current, t2: ik.t2, w2: grabVel2Ref.current };
+      if (frameDt > 0 && !agent.converged) {
+        const demoU = inverseDynJ1(prevGrabState, gs, frameDt);
+        const demoIdx = nearestActionIdx(demoU);
+        const demoR = pendReward(gs, ACTION_TORQUES[demoIdx]);
+        agent.injectDemo(getObs(prevGrabState), demoIdx, demoR * REWARD_SCALE, getObs(gs));
+      }
       physRef.current = gs;
       physPrevRef.current = gs;
       visibleEnvRef.current = gs;
@@ -650,11 +885,17 @@ function SceneRunner({
     } else {
       if (wasGrabRef.current) {
         wasGrabRef.current = false;
-        const rs = { th: physRef.current.th, w: Math.max(-MAX_SPEED, Math.min(MAX_SPEED, grabVelRef.current)) };
+        const rs: PendState = {
+          t1: physRef.current.t1,
+          w1: Math.max(-MAX_SPEED, Math.min(MAX_SPEED, grabVel1Ref.current)),
+          t2: physRef.current.t2,
+          w2: Math.max(-MAX_SPEED, Math.min(MAX_SPEED, grabVel2Ref.current)),
+        };
         physRef.current = rs;
         physPrevRef.current = rs;
         visibleEnvRef.current = rs;
-        grabVelRef.current = 0;
+        grabVel1Ref.current = 0;
+        grabVel2Ref.current = 0;
         accumRef.current = 0;
         agent.resetVisibleEpisode();
         if (!agent.trainingActive) { agent.startTraining(); onFirstRelease(); }
@@ -669,6 +910,7 @@ function SceneRunner({
           ? agent.act(getObs(prev), agent.converged).action
           : 0;
         physRef.current = stepPend(prev, torque);
+        getEngine().env = physRef.current;
         if (agent.trainingActive) {
           agent.recordVisibleStep(prev, torque, physRef.current);
         }
@@ -676,8 +918,10 @@ function SceneRunner({
 
       const t = accumRef.current / DT;
       visibleEnvRef.current = {
-        th: physPrevRef.current.th + (physRef.current.th - physPrevRef.current.th) * t,
-        w: physPrevRef.current.w + (physRef.current.w - physPrevRef.current.w) * t,
+        t1: physPrevRef.current.t1 + (physRef.current.t1 - physPrevRef.current.t1) * t,
+        w1: physPrevRef.current.w1 + (physRef.current.w1 - physPrevRef.current.w1) * t,
+        t2: physPrevRef.current.t2 + (physRef.current.t2 - physPrevRef.current.t2) * t,
+        w2: physPrevRef.current.w2 + (physRef.current.w2 - physPrevRef.current.w2) * t,
       };
     }
 
@@ -688,7 +932,7 @@ function SceneRunner({
 
   return (
     <group position={[PEND_OFFSET_X, PEND_OFFSET_Y, 0]}>
-      <PendulumMesh envRef={visibleEnvRef} convergedRef={convergedRef} />
+      <PendulumMesh envRef={visibleEnvRef} convergedRef={convergedRef} grabActiveRef={grabActiveRef} />
       <GrabPlane envRef={visibleEnvRef} grabRef={grabRef} />
     </group>
   );
@@ -697,7 +941,7 @@ function SceneRunner({
 /* ================================================================
    HUD overlays
 ================================================================ */
-function RewardPlot({ agentRef }: { agentRef: MutableRefObject<DQNAgent | null> }) {
+function RewardPlot({ agentRef }: { agentRef: MutableRefObject<DQNAgent> }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [tick, setTick] = useState(0);
 
@@ -712,10 +956,11 @@ function RewardPlot({ agentRef }: { agentRef: MutableRefObject<DQNAgent | null> 
     if (!canvas || !agent) return;
     const rH = agent.plotRewardHistory;
     const uH = agent.plotUprightHistory;
+    const eH = agent.plotEpsilonHistory;
     if (rH.length < 1) { canvas.width = 0; canvas.height = 0; return; }
 
     const dpr = window.devicePixelRatio || 1;
-    const W = 220, H = 100;
+    const W = 240, H = 110;
     canvas.width = W * dpr; canvas.height = H * dpr;
     canvas.style.width = `${W}px`; canvas.style.height = `${H}px`;
     const ctx = canvas.getContext("2d");
@@ -723,17 +968,32 @@ function RewardPlot({ agentRef }: { agentRef: MutableRefObject<DQNAgent | null> 
     ctx.scale(dpr, dpr);
     ctx.clearRect(0, 0, W, H);
 
-    const ml = 4, mr = 4, mt = 14, mb = 4, pw = W - ml - mr, ph = H - mt - mb;
+    const ml = 28, mr = 26, mt = 16, mb = 4, pw = W - ml - mr, ph = H - mt - mb;
 
-    ctx.fillStyle = "rgba(255,255,255,0.35)";
     ctx.font = "7px monospace";
     ctx.textAlign = "left";
-    ctx.fillText("reward / step", ml, 9);
+    let lx = ml;
+    ctx.fillStyle = "#22d3ee"; ctx.fillText("reward", lx, 9); lx += ctx.measureText("reward").width + 6;
+    ctx.fillStyle = "rgba(251,191,36,0.7)"; ctx.fillText("upright%", lx, 9); lx += ctx.measureText("upright%").width + 6;
+    ctx.fillStyle = "rgba(167,139,250,0.6)"; ctx.fillText("epsilon", lx, 9);
 
     if (rH.length >= 2) {
       const rMin = Math.min(...rH) - 0.2;
       const rMax = Math.max(...rH) + 0.2;
       const rR = rMax - rMin || 1;
+
+      ctx.fillStyle = "rgba(34,211,238,0.35)";
+      ctx.font = "6px monospace";
+      ctx.textAlign = "right";
+      const ticks = 4;
+      for (let t = 0; t <= ticks; t++) {
+        const v = rMin + (rR * t) / ticks;
+        const y = mt + ph * (1 - t / ticks);
+        ctx.fillText(v.toFixed(1), ml - 3, y + 2);
+        ctx.strokeStyle = "rgba(255,255,255,0.06)"; ctx.lineWidth = 0.5;
+        ctx.beginPath(); ctx.moveTo(ml, y); ctx.lineTo(ml + pw, y); ctx.stroke();
+      }
+
       ctx.strokeStyle = "#22d3ee"; ctx.lineWidth = 1.5; ctx.beginPath();
       for (let i = 0; i < rH.length; i++) {
         const x = ml + (i / Math.max(1, rH.length - 1)) * pw;
@@ -757,9 +1017,23 @@ function RewardPlot({ agentRef }: { agentRef: MutableRefObject<DQNAgent | null> 
         if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
       }
       ctx.stroke();
-      ctx.fillStyle = "rgba(251,191,36,0.5)"; ctx.font = "6px monospace"; ctx.textAlign = "right";
-      ctx.fillText("upright%", ml + pw, mt + 6);
     }
+
+    if (eH.length >= 2) {
+      ctx.strokeStyle = "rgba(167,139,250,0.45)"; ctx.setLineDash([3, 3]); ctx.lineWidth = 1; ctx.beginPath();
+      for (let i = 0; i < eH.length; i++) {
+        const x = ml + (i / Math.max(1, eH.length - 1)) * pw;
+        const y = mt + ph * (1 - eH[i]);
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      ctx.stroke(); ctx.setLineDash([]);
+    }
+
+    ctx.font = "6px monospace"; ctx.textAlign = "left";
+    const rightX = ml + pw + 3;
+    ctx.fillStyle = "rgba(251,191,36,0.45)";
+    ctx.fillText("1", rightX, mt + 3);
+    ctx.fillText("0", rightX, mt + ph + 3);
   }, [tick, agentRef]);
 
   return (
@@ -803,7 +1077,7 @@ function StatsHud({
       <div className="flex items-center gap-2 mb-1">
         <span className={`inline-block w-1.5 h-1.5 rounded-full ${converged ? "bg-good" : s.trainingActive ? "bg-accent2" : "bg-gray-600"} animate-pulse`} />
         <span className="uppercase tracking-[0.2em] text-[9px] text-gray-500">
-          {converged ? "RL converged" : s.trainingActive ? "RL training" : "grab the pendulum"}
+          {converged ? "RL converged" : s.trainingActive ? "RL training" : "grab & invert"}
         </span>
       </div>
       {s.trainingActive && (
@@ -826,26 +1100,38 @@ function StatsHud({
 }
 
 /* ================================================================
-   PendulumScene — top-level exported component
+   PendulumScene — top-level exported component with guided UX
 ================================================================ */
 export default function PendulumScene() {
-  const agentRef = useRef<DQNAgent | null>(null);
-  const visibleEnvRef = useRef<PendState>({ th: Math.PI + (Math.random() - 0.5) * 0.4, w: 0 });
-  const convergedRef = useRef(false);
+  const [engine] = useState(() => { const e = getEngine(); stopBackground(e); return e; });
+  const agentRef = useRef<DQNAgent>(engine.agent);
+  const visibleEnvRef = useRef<PendState>({ ...engine.env });
+  const convergedRef = useRef(engine.agent.converged);
   const grabRef = useRef<GrabState>({ active: false, wx: 0, wy: 0 });
-  const statsRef = useRef<TrainStats>({ ...INIT_STATS });
-  const [ready, setReady] = useState(false);
-  const [trainingStarted, setTrainingStarted] = useState(false);
-  const [trainingDone, setTrainingDone] = useState(false);
+  const grabActiveRef = useRef(false);
+  const statsRef = useRef<TrainStats>({ ...engine.agent.stats });
+  const [trainingStarted, setTrainingStarted] = useState(engine.trainingStarted);
+  const [isGrabbing, setIsGrabbing] = useState(false);
+  const [trainingDone, setTrainingDone] = useState(engine.convergenceCounted);
   const [showToast, setShowToast] = useState(false);
   const [overlayRoot, setOverlayRoot] = useState<HTMLElement | null>(null);
   const [trainMePos, setTrainMePos] = useState<{ x: number; y: number } | null>(null);
+  const eventSourceRef = useRef<HTMLElement>(null!);
 
   useEffect(() => {
-    let cancelled = false;
-    const agent = new DQNAgent();
-    if (!cancelled) { agentRef.current = agent; setReady(true); }
-    return () => { cancelled = true; };
+    agentRef.current = engine.agent;
+    visibleEnvRef.current = { ...engine.env };
+    convergedRef.current = engine.agent.converged;
+    if (engine.trainingStarted) setTrainingStarted(true);
+    if (engine.convergenceCounted) setTrainingDone(true);
+    const hero = document.getElementById("top");
+    if (hero) (eventSourceRef as React.MutableRefObject<HTMLElement>).current = hero;
+    return () => { startBackground(engine); };
+  }, [engine]);
+
+  useEffect(() => {
+    const id = setInterval(() => setIsGrabbing(grabRef.current.active), 50);
+    return () => clearInterval(id);
   }, []);
 
   useEffect(() => {
@@ -858,31 +1144,46 @@ export default function PendulumScene() {
     return () => { el.remove(); };
   }, []);
 
-  const handleFirstRelease = useCallback(() => { setTrainingStarted(true); }, []);
+  const handleFirstRelease = useCallback(() => {
+    setTrainingStarted(true);
+    engine.trainingStarted = true;
+    engine.trainingStartTime = Date.now();
+  }, [engine]);
 
-  const countedRef = useRef(false);
   useEffect(() => {
     if (trainingDone) return;
     const id = setInterval(() => {
-      if (statsRef.current.converged && !countedRef.current) {
-        countedRef.current = true;
+      if (engine.agent.converged && !engine.convergenceCounted) {
+        engine.convergenceCounted = true;
         setTrainingDone(true);
         setShowToast(true);
         setTimeout(() => setShowToast(false), 4200);
         (async () => {
           try {
-            const res = await fetch("/api/stats/trainings", { method: "POST" });
+            const elapsed = engine.trainingStartTime > 0
+              ? Math.round((Date.now() - engine.trainingStartTime) / 1000)
+              : null;
+            const res = await fetch("/api/stats/trainings", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ timeSeconds: elapsed }),
+            });
             if (!res.ok) return;
-            const data = (await res.json()) as { trainings?: number };
+            const data = (await res.json()) as { trainings?: number; bestTime?: number | null };
             if (typeof data.trainings === "number") {
-              window.dispatchEvent(new CustomEvent("pendulum-training-complete", { detail: { trainings: data.trainings } }));
+              window.dispatchEvent(new CustomEvent("pendulum-training-complete", {
+                detail: { trainings: data.trainings, bestTime: data.bestTime ?? null },
+              }));
             }
           } catch { /* best-effort */ }
         })();
       }
     }, 150);
     return () => clearInterval(id);
-  }, [trainingDone]);
+  }, [trainingDone, engine]);
+
+  const showTrainMe = !trainingStarted && !isGrabbing;
+  const showInvertMe = !trainingStarted && isGrabbing;
 
   return (
     <div className="relative w-full h-full" style={{ touchAction: "none" }}>
@@ -890,12 +1191,16 @@ export default function PendulumScene() {
       <style>{`
         @keyframes trainMeBob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-10px); } }
         @keyframes trainMeArrow { 0%, 100% { transform: translateY(0); opacity: 1; } 50% { transform: translateY(6px); opacity: 0.6; } }
+        @keyframes fadeInUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
       `}</style>
       <Canvas
         className="absolute inset-0"
         camera={{ position: [0, -1.0, 5.6], fov: 48 }}
         dpr={[1, 2]}
         gl={{ antialias: true, alpha: true }}
+        eventSource={eventSourceRef}
+        eventPrefix="client"
+        style={{ pointerEvents: "none" }}
       >
         <ambientLight intensity={0.3} />
         <pointLight position={[3, 3, 4]} intensity={1.5} color="#22d3ee" />
@@ -904,23 +1209,16 @@ export default function PendulumScene() {
         <directionalLight position={[4, 5, 2]} intensity={0.9} color="#e8ecf5" />
         <hemisphereLight args={["#1a2540", "#0a0f1e", 0.25]} />
         <PivotProjector onPosition={setTrainMePos} />
-        {ready && (
-          <SceneRunner
-            agentRef={agentRef}
-            visibleEnvRef={visibleEnvRef}
-            convergedRef={convergedRef}
-            grabRef={grabRef}
-            statsRef={statsRef}
-            onFirstRelease={handleFirstRelease}
-          />
-        )}
+        <SceneRunner
+          agentRef={agentRef}
+          visibleEnvRef={visibleEnvRef}
+          convergedRef={convergedRef}
+          grabRef={grabRef}
+          grabActiveRef={grabActiveRef}
+          statsRef={statsRef}
+          onFirstRelease={handleFirstRelease}
+        />
       </Canvas>
-
-      {!ready && (
-        <div className="absolute inset-0 flex items-center justify-center text-[10px] font-mono uppercase tracking-[0.22em] text-gray-500">
-          initializing…
-        </div>
-      )}
 
       {overlayRoot && createPortal(
         <>
@@ -929,7 +1227,7 @@ export default function PendulumScene() {
             <StatsHud statsRef={statsRef} convergedRef={convergedRef} />
           </div>
 
-          {ready && !trainingStarted && trainMePos && (
+          {showTrainMe && trainMePos && (
             <div
               className="absolute pointer-events-none select-none"
               style={{ left: `${trainMePos.x}%`, top: `${trainMePos.y}%`, transform: "translate(-50%, -100%)" }}
@@ -951,9 +1249,23 @@ export default function PendulumScene() {
             </div>
           )}
 
+          {showInvertMe && trainMePos && (
+            <div
+              className="absolute pointer-events-none select-none"
+              style={{ left: `${trainMePos.x}%`, top: `${trainMePos.y}%`, transform: "translate(-50%, -100%)", animation: "fadeInUp 0.3s ease-out" }}
+            >
+              <span
+                className="font-mono font-semibold text-lg sm:text-xl uppercase tracking-[0.14em]"
+                style={{ color: "#22d3ee", textShadow: "0 0 14px rgba(34,211,238,0.5), 0 0 30px rgba(34,211,238,0.2)" }}
+              >
+                {PENDUBOT_MODE === "full" ? "Now Invert Me" : "Flip the Tip Up!"}
+              </span>
+            </div>
+          )}
+
           {showToast && (
             <div className="absolute top-6 left-1/2 -translate-x-1/2 rounded-full bg-gradient-to-r from-[#fbbf24]/20 to-[#f59e0b]/20 border border-[#fbbf24]/60 backdrop-blur px-5 py-2 text-[11px] font-mono uppercase tracking-[0.22em] text-[#fbbf24] shadow-[0_0_30px_rgba(251,191,36,0.4)] animate-pulse pointer-events-none">
-              ✦ RL converged — swing-up mastered
+              ✦ RL converged — balance mastered
             </div>
           )}
         </>,

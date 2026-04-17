@@ -25,6 +25,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const TRAININGS_KEY = "pendulum:trainings";
+const BEST_TIME_KEY = "pendulum:best_time";
 
 async function readTrainings(): Promise<number> {
   const redis = await getRedis();
@@ -38,8 +39,21 @@ async function readTrainings(): Promise<number> {
   }
 }
 
+async function readBestTime(): Promise<number | null> {
+  const redis = await getRedis();
+  if (!redis) return null;
+  try {
+    const v = await redis.get(BEST_TIME_KEY);
+    if (v === null) return null;
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function GET() {
-  const trainings = await readTrainings();
+  const [trainings, bestTime] = await Promise.all([readTrainings(), readBestTime()]);
 
   const body: SiteStats = {
     publications: siteStatsJson.publications,
@@ -47,6 +61,7 @@ export async function GET() {
     hIndex: siteStatsJson.hIndex,
     i10Index: siteStatsJson.i10Index,
     trainings,
+    bestTime,
     reading: {
       title: siteStatsJson.reading.title,
       authors: siteStatsJson.reading.authors,

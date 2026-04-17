@@ -25,11 +25,20 @@ function formatInt(n: number): string {
   return n.toLocaleString("en-US");
 }
 
+function formatTime(seconds: number): string {
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
 function buildCredentials(stats: SiteStats | null): ReactNode[] {
   if (!stats) return STATIC_CREDENTIALS;
+  const trainLine = stats.bestTime
+    ? `${formatInt(stats.trainings)} pendulums trained globally · best time ${formatTime(stats.bestTime)}`
+    : `${formatInt(stats.trainings)} pendulums trained globally`;
   const live: ReactNode[] = [
     `${stats.publications} publications · ${formatInt(stats.citations)} citations`,
-    `${formatInt(stats.trainings)} pendulums trained globally`,
+    trainLine,
     <>
       reading:{" "}
       <a
@@ -73,10 +82,10 @@ function FadingCredentials() {
      reflects the new global total without a page refresh. */
   useEffect(() => {
     const onTrained = (e: Event) => {
-      const detail = (e as CustomEvent<{ trainings?: number }>).detail;
+      const detail = (e as CustomEvent<{ trainings?: number; bestTime?: number | null }>).detail;
       if (!detail || typeof detail.trainings !== "number") return;
       setStats((prev) =>
-        prev ? { ...prev, trainings: detail.trainings! } : prev,
+        prev ? { ...prev, trainings: detail.trainings!, bestTime: detail.bestTime ?? prev.bestTime } : prev,
       );
     };
     window.addEventListener("pendulum-training-complete", onTrained);

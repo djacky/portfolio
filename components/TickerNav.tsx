@@ -2,7 +2,7 @@
 
 import { useNavigation, type SectionId } from "./SectionRouter";
 import { useContactDrawer } from "./ContactDrawer";
-import { Home, MessageSquare } from "lucide-react";
+import { Home } from "lucide-react";
 import { motion } from "framer-motion";
 
 const SECTIONS: { id: SectionId; label: string }[] = [
@@ -14,22 +14,20 @@ const SECTIONS: { id: SectionId; label: string }[] = [
   { id: "match", label: "match" },
 ];
 
-function TickerLabels({
+function TickerSet({
   activeSection,
   goTo,
+  openContact,
 }: {
   activeSection: SectionId;
   goTo: (id: SectionId) => void;
+  openContact: () => void;
 }) {
   return (
     <>
-      {SECTIONS.map((s, i) => (
-        <span key={s.id} className="inline-flex items-center gap-8 shrink-0">
-          {i > 0 && (
-            <span className="text-accent2/30 select-none" aria-hidden>
-              ·
-            </span>
-          )}
+      {SECTIONS.map((s) => (
+        <span key={s.id} className="inline-flex items-center shrink-0">
+          <span className="text-accent2/30 select-none px-10" aria-hidden>·</span>
           <button
             type="button"
             onClick={() => goTo(s.id)}
@@ -43,6 +41,16 @@ function TickerLabels({
           </button>
         </span>
       ))}
+      <span className="inline-flex items-center shrink-0">
+        <span className="text-accent2/30 select-none px-10" aria-hidden>·</span>
+        <button
+          type="button"
+          onClick={openContact}
+          className="transition-all whitespace-nowrap font-bold text-accent2/60 hover:text-accent2"
+        >
+          contact
+        </button>
+      </span>
     </>
   );
 }
@@ -58,8 +66,6 @@ export default function TickerNav() {
       transition={{ duration: 0.4 }}
       className="fixed top-5 left-0 right-0 z-50 h-10 flex items-center"
     >
-
-      {/* right side: contact + home */}
       <div className="shrink-0 flex items-center gap-2 px-3">
         <button
           type="button"
@@ -71,36 +77,17 @@ export default function TickerNav() {
         </button>
       </div>
 
-      {/* ticker area */}
       <div
         className="flex-1 overflow-hidden relative group"
         style={{ maskImage: "linear-gradient(90deg, transparent, black 60px, black calc(100% - 60px), transparent)" }}
       >
         <div
-          className="flex items-center gap-8 font-mono text-[17px] uppercase tracking-[0.35em] animate-ticker-scroll group-hover:[animation-play-state:paused] whitespace-nowrap w-max"
+          className="flex items-center font-mono text-[17px] uppercase tracking-[0.35em] animate-ticker-scroll group-hover:[animation-play-state:paused] whitespace-nowrap w-max"
         >
-          {/* triple the labels for infinite scroll illusion */}
-          <TickerLabels activeSection={activeSection} goTo={goTo} />
-          <span className="text-accent2/30 select-none px-8" aria-hidden>
-            ·
-          </span>
-          <TickerLabels activeSection={activeSection} goTo={goTo} />
-          <span className="text-accent2/30 select-none px-8" aria-hidden>
-            ·
-          </span>
-          <TickerLabels activeSection={activeSection} goTo={goTo} />
+          <TickerSet activeSection={activeSection} goTo={goTo} openContact={openContact} />
+          <TickerSet activeSection={activeSection} goTo={goTo} openContact={openContact} />
+          <TickerSet activeSection={activeSection} goTo={goTo} openContact={openContact} />
         </div>
-      </div>
-
-      <div className="shrink-0 flex items-center gap-2 px-3">
-        <button
-          type="button"
-          onClick={openContact}
-          className="flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-[0.2em] text-gray-500 hover:text-accent2 transition-colors"
-        >
-          <MessageSquare className="w-3 h-3" />
-          <span className="hidden sm:inline">Contact</span>
-        </button>
       </div>
     </motion.nav>
   );

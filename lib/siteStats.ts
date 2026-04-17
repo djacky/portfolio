@@ -14,6 +14,7 @@ export type SiteStats = {
   hIndex: number;
   i10Index: number;
   trainings: number;
+  bestTime: number | null;
   reading: {
     title: string;
     authors: string;

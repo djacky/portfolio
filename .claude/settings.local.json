@@ -62,7 +62,26 @@
       "Bash(node scripts/test-dqn-curriculum.mjs)",
       "Bash(curl:*)",
       "Bash(powershell:*)",
-      "Bash(node scripts/test-ppo-convergence.mjs)"
+      "Bash(node scripts/test-ppo-convergence.mjs)",
+      "Bash(mkdir -p \"A:/Projects/jobApply/src/platforms/ats\" \"A:/Projects/jobApply/src/platforms/_stubs\" \"A:/Projects/jobApply/src/llm\" \"A:/Projects/jobApply/src/latex\" \"A:/Projects/jobApply/src/forms\" \"A:/Projects/jobApply/src/storage\" \"A:/Projects/jobApply/src/notify\" \"A:/Projects/jobApply/src/browser\" \"A:/Projects/jobApply/scripts\" \"A:/Projects/jobApply/tests/fixtures\")",
+      "Bash(mkdir -p \"A:/FindWork/queue/01_discovered\" \"A:/FindWork/queue/02_pending_approval\" \"A:/FindWork/queue/03_tailored\" \"A:/FindWork/queue/04_submitted\" \"A:/FindWork/queue/rejected\" \"A:/FindWork/queue/failed\" \"A:/FindWork/dossier\" \"A:/FindWork/browser_profile\" \"A:/FindWork/output\" \"A:/FindWork/latex/cv\" \"A:/FindWork/latex/cover_letter\")",
+      "Bash(.venv/Scripts/python.exe -m pip install --quiet --upgrade pip)",
+      "Bash(.venv/Scripts/python.exe -m pip install --quiet \"pydantic>=2.7\" \"python-dotenv>=1.0\" \"pytest>=8.0\" \"pytest-asyncio>=0.24\")",
+      "Bash(.venv/Scripts/python.exe -m pytest -v)",
+      "Bash(.venv/Scripts/python.exe -m pytest -q)",
+      "Bash(.venv/Scripts/python.exe -m pip install --quiet anthropic)",
+      "Bash(.venv/Scripts/python.exe -c \"import anthropic; print\\(anthropic.__version__\\)\")",
+      "Bash(.venv/Scripts/python.exe -m pip install --quiet httpx)",
+      "Bash(.venv/Scripts/python.exe -c \"import httpx; print\\(httpx.__version__\\)\")",
+      "Bash(./.venv/Scripts/python.exe -m pytest tests/test_submit.py tests/test_state.py -q)",
+      "Bash(./.venv/Scripts/python.exe -m pytest -q)",
+      "Read(//c/Users/ack/Downloads/**)",
+      "Bash(./.venv/Scripts/python.exe -m pytest tests/test_scheduler.py -q)",
+      "WebFetch(domain:jaromiru.com)",
+      "WebFetch(domain:danieltakeshi.github.io)",
+      "WebFetch(domain:psc-g.github.io)",
+      "Bash(./node_modules/.bin/tsc --noEmit)",
+      "Bash(node ./node_modules/typescript/bin/tsc --noEmit)"
     ]
   }
 }
