@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "type-check": "tsc --noEmit"
   },
   "dependencies": {
     "@react-three/drei": "^9.114.3",
@@ -16,6 +17,7 @@
     "@types/matter-js": "^0.20.2",
     "clsx": "2.1.1",
     "framer-motion": "11.3.8",
+    "katex": "^0.16.45",
     "lucide-react": "0.414.0",
     "matter-js": "^0.20.0",
     "next": "14.2.5",

@@ -31,15 +31,15 @@ const PENDUBOT_MODE: PendubotMode = "full";
    Lagrangian EOM with mass matrix inversion, RK4 integration.
 ================================================================ */
 const G_PHYS = 10;
-const M1 = 1, M2 = 0.5;
+const M1 = 1, M2 = 0.3;
 const L1 = 0.6, L2 = 0.6;
 const LC1 = L1 / 2, LC2 = L2 / 2;
 const I1 = M1 * L1 * L1 / 12, I2 = M2 * L2 * L2 / 12;
-const MAX_TORQUE = 15;
+const MAX_TORQUE = PENDUBOT_MODE == 'full' ? 20 : 10;
 const DT = 0.05;
 const MAX_SPEED = 15;
-const DAMP1 = 0;
-const DAMP2 = 0;
+const DAMP1 = 0.02;
+const DAMP2 = 0.005;
 const EP_LEN = 200;
 
 const _D1 = M1 * LC1 * LC1 + I1 + M2 * L1 * L1;
@@ -87,10 +87,20 @@ function getObs(s: PendState): Float64Array {
 }
 
 function pendReward(s: PendState, u: number): number {
-  const upright = PENDUBOT_MODE === "full"
-    ? (Math.cos(s.t1) + 1) / 2 * (Math.cos(s.t2) + 1) / 2
-    : (-Math.cos(s.t1) + 1) / 2 * (Math.cos(s.t2) + 1) / 2;
-  return upright - 0.002 * (s.w1 * s.w1 + s.w2 * s.w2) - 0.001 * u * u;
+    const upright = PENDUBOT_MODE === "full"
+      ? (Math.cos(s.t1) + 1) / 2 * (Math.cos(s.t2) + 1) / 2
+      : (-Math.cos(s.t1) + 1) / 2 * (Math.cos(s.t2) + 1) / 2;
+
+    // u·ω₁ > 0  ⇔ torque pushes the same direction joint 1 is already moving (pumping energy).
+    // max(0, …)  ⇒ only pumping is penalized; braking (u·ω₁ < 0) is free.
+    // upright²   ⇒ near-zero during swing-up, strong at the top → swing-up corridor preserved.
+    const pushWithMotion = Math.max(0, u * s.w1);
+    const brakeTerm = 0.01 * upright * upright * pushWithMotion;
+
+    return upright
+         - 0.002 * (s.w1 * s.w1 + s.w2 * s.w2)   // ← revert to uniform
+         - 0.001 * u * u
+         - brakeTerm;
 }
 
 function inverseDynJ1(prev: PendState, next: PendState, dt: number): number {
@@ -136,7 +146,7 @@ function seededGauss(rng: () => number): number {
    Learns online from actual visible pendulum transitions.
 ================================================================ */
 const OBS_DIM = 6;
-const N_ACTIONS = 21;
+const N_ACTIONS = PENDUBOT_MODE == 'full' ? 21 : 11;
 const ACTION_TORQUES = Float64Array.from(
   { length: N_ACTIONS }, (_, i) => -MAX_TORQUE + (2 * MAX_TORQUE / (N_ACTIONS - 1)) * i,
 );
@@ -144,7 +154,7 @@ const DQN_HIDDEN = 64;
 const REPLAY_CAP = 50000;
 const BATCH_SIZE = 32;
 const UPDATES_PER_STEP = 16;
-const DQN_LR = 0.003;
+const DQN_LR = PENDUBOT_MODE == 'full' ? 0.003 : 0.03;
 const GAMMA = 0.99;
 const EPS_START = 1.0;
 const EPS_END = 0.01;
@@ -156,6 +166,16 @@ const CONVERGE_FRAC = 0.50;
 const CONVERGE_HOLD = 3;
 const MIN_CONVERGE_STEPS = 1000;
 const PLOT_WINDOW = 40;
+/** Warm-start Gaussian perturbation applied to loaded weights. Small
+ *  enough that the policy still nails balance from equilibrium, large
+ *  enough that the HUD shows a visible ~20–30s stabilization before
+ *  convergence fires (3 consecutive episodes ≥ CONVERGE_FRAC). */
+const WARM_START_SIGMA = 0.02;
+/** Master switch for the bestNet snapshot. When false, the agent doesn't
+ *  update bestNet on new-best episodes and skips the warm-start seed.
+ *  Turn off during a reward-function transition so a stale-reward snapshot
+ *  can't be captured; re-enable once the new reward has stabilised. */
+const BESTNET_GUARD_ENABLED = true;
 
 type TrainStats = {
   updates: number;
@@ -262,6 +282,31 @@ class DQNNet {
     for (let p = 0; p < this.params.length; p++) this.params[p].set(other.params[p]);
   }
 
+  exportParams(): number[][] {
+    // Full f64 precision — any rounding here lossy-compresses the policy
+    // and can flip argmax at tight decision boundaries (especially swing-
+    // up states where the margin between adjacent torque bins is small).
+    return this.params.map((p) => Array.from(p));
+  }
+
+  loadParams(data: number[][]): boolean {
+    if (!Array.isArray(data) || data.length !== this.params.length) return false;
+    for (let p = 0; p < this.params.length; p++) {
+      if (!Array.isArray(data[p]) || data[p].length !== this.params[p].length) return false;
+    }
+    for (let p = 0; p < this.params.length; p++) {
+      const dst = this.params[p], src = data[p];
+      for (let i = 0; i < dst.length; i++) dst[i] = src[i];
+    }
+    return true;
+  }
+
+  perturb(sigma: number, rng: () => number) {
+    for (const p of this.params) {
+      for (let i = 0; i < p.length; i++) p[i] += seededGauss(rng) * sigma;
+    }
+  }
+
   softUpdate(src: DQNNet, tau: number) {
     for (let p = 0; p < this.params.length; p++) {
       const t = this.params[p], s = src.params[p];
@@ -293,7 +338,6 @@ class DQNAgent {
   stats: TrainStats = { ...INIT_STATS };
   private bestNet: DQNNet | null = null;
   private bestUprightSnapshot = 0;
-  private degradeCount = 0;
 
   private visSteps = 0;
   private visRewardAcc = 0;
@@ -319,6 +363,101 @@ class DQNAgent {
 
   injectDemo(o: Float64Array, a: number, r: number, n: Float64Array) {
     this.pushReplay(o, a, r, n);
+  }
+
+  exportReplay(maxSamples = 10000): Array<{ o: number[]; a: number; r: number; n: number[] }> {
+    const size = this.replaySize;
+    if (size === 0) return [];
+    const total = Math.min(maxSamples, size);
+    const step = size / total;
+    const round = (x: number) => Math.round(x * 1e5) / 1e5;
+    const out: Array<{ o: number[]; a: number; r: number; n: number[] }> = new Array(total);
+    for (let i = 0; i < total; i++) {
+      const idx = Math.floor(i * step) % size;
+      const off = idx * this.stride;
+      const o = new Array<number>(OBS_DIM);
+      const n = new Array<number>(OBS_DIM);
+      for (let k = 0; k < OBS_DIM; k++) {
+        o[k] = round(this.replay[off + k]);
+        n[k] = round(this.replay[off + OBS_DIM + 2 + k]);
+      }
+      out[i] = {
+        o,
+        a: this.replay[off + OBS_DIM],
+        r: round(this.replay[off + OBS_DIM + 1]),
+        n,
+      };
+    }
+    return out;
+  }
+
+  getReplaySize(): number { return this.replaySize; }
+
+  async injectBatch(
+    transitions: ReadonlyArray<{ o: number[]; a: number; r: number; n: number[] }>,
+    opts: { chunkSize?: number; onProgress?: (done: number, total: number) => void } = {},
+  ): Promise<void> {
+    const chunkSize = opts.chunkSize ?? 300;
+    const total = transitions.length;
+    const oBuf = new Float64Array(OBS_DIM);
+    const nBuf = new Float64Array(OBS_DIM);
+    for (let i = 0; i < total; i += chunkSize) {
+      const end = Math.min(i + chunkSize, total);
+      for (let j = i; j < end; j++) {
+        const t = transitions[j];
+        for (let k = 0; k < OBS_DIM; k++) { oBuf[k] = t.o[k]; nBuf[k] = t.n[k]; }
+        this.pushReplay(oBuf, t.a, t.r * REWARD_SCALE, nBuf);
+      }
+      opts.onProgress?.(end, total);
+      await new Promise<void>((r) => requestAnimationFrame(() => r()));
+    }
+  }
+
+  exportWeights(): { online: number[][]; target: number[][] } {
+    return {
+      online: this.onlineNet.exportParams(),
+      target: this.targetNet.exportParams(),
+    };
+  }
+
+  /** Load pre-trained weights with a small Gaussian perturbation, so the
+   *  policy starts near-converged but has a brief visible stabilization
+   *  window (~20–30s) before the HUD flips to converged. Normal online
+   *  training runs post-load, pulling the slightly noisy weights back
+   *  onto the good optimum. ε is parked at EPS_END (greedy-ish) by
+   *  fast-forwarding totalSteps past EPS_DECAY.                         */
+  loadWeights(data: { online: number[][]; target: number[][] }): boolean {
+    if (!data || !this.onlineNet.loadParams(data.online)) return false;
+    if (!this.targetNet.loadParams(data.target)) return false;
+    this.onlineNet.perturb(WARM_START_SIGMA, this.rng);
+    this.targetNet.copyFrom(this.onlineNet);
+    if (BESTNET_GUARD_ENABLED) {
+      if (!this.bestNet) this.bestNet = new DQNNet(() => 0);
+      this.bestNet.copyFrom(this.onlineNet);
+      this.bestUprightSnapshot = CONVERGE_FRAC;
+    }
+    this.totalSteps = Math.max(this.totalSteps, EPS_DECAY + MIN_CONVERGE_STEPS);
+    this.epsilon = EPS_END;
+    return true;
+  }
+
+  async warmStartTrain(
+    totalUpdates: number,
+    opts: { updatesPerFrame?: number; onProgress?: (done: number, total: number) => void } = {},
+  ): Promise<void> {
+    if (this.replaySize < MIN_REPLAY) return;
+    const perFrame = opts.updatesPerFrame ?? 8;
+    let done = 0;
+    while (done < totalUpdates) {
+      const n = Math.min(perFrame, totalUpdates - done);
+      for (let i = 0; i < n; i++) this.trainStep();
+      this.targetNet.softUpdate(this.onlineNet, TARGET_TAU);
+      done += n;
+      opts.onProgress?.(done, totalUpdates);
+      await new Promise<void>((r) => requestAnimationFrame(() => r()));
+    }
+    this.totalSteps = Math.max(this.totalSteps, Math.round(EPS_DECAY * 0.7));
+    this.epsilon = Math.max(EPS_END, EPS_START - (EPS_START - EPS_END) * this.totalSteps / EPS_DECAY);
   }
 
   private pushReplay(o: Float64Array, a: number, r: number, n: Float64Array) {
@@ -382,21 +521,15 @@ class DQNAgent {
       this.rewardHistory.push(epR);
       this.uprightHistory.push(epUp);
       this.bestUpright = Math.max(this.bestUpright, epUp);
-      if (epUp > this.bestUprightSnapshot && epUp >= CONVERGE_FRAC) {
+      if (BESTNET_GUARD_ENABLED && epUp > this.bestUprightSnapshot && epUp >= CONVERGE_FRAC) {
         this.bestUprightSnapshot = epUp;
         if (!this.bestNet) this.bestNet = new DQNNet(() => 0);
         this.bestNet.copyFrom(this.onlineNet);
       }
-      if (this.converged && this.bestNet && epUp < 0.2) {
-        this.degradeCount++;
-        if (this.degradeCount >= 3) {
-          this.onlineNet.copyFrom(this.bestNet);
-          this.targetNet.copyFrom(this.bestNet);
-          this.degradeCount = 0;
-        }
-      } else if (this.converged && epUp >= CONVERGE_FRAC) {
-        this.degradeCount = 0;
-      }
+      // bestNet is only snapshotted, never reloaded: on a post-convergence
+      // collapse the snapshot is also OOD (hanging + high-ω is outside its
+      // training distribution), so live gradient updates recover faster
+      // than a reload would. Snapshot is kept for warm-start export only.
       this.visRewardWindow.push(epR);
       this.visUprightWindow.push(epUp);
       if (this.visRewardWindow.length > 10) this.visRewardWindow.shift();
@@ -816,6 +949,18 @@ function PivotProjector({ onPosition }: { onPosition: (p: { x: number; y: number
   return null;
 }
 
+function BaseProjector({ onPosition }: { onPosition: (p: { x: number; y: number }) => void }) {
+  const called = useRef(false);
+  useFrame((state) => {
+    if (called.current) return;
+    called.current = true;
+    const v = new THREE.Vector3(PEND_OFFSET_X, PEND_OFFSET_Y - 1.55, 0);
+    v.project(state.camera);
+    onPosition({ x: (v.x * 0.5 + 0.5) * 100, y: (-v.y * 0.5 + 0.5) * 100 });
+  });
+  return null;
+}
+
 /* ================================================================
    SceneRunner — game loop with IK grab + double pendulum physics
 ================================================================ */
@@ -847,7 +992,6 @@ function SceneRunner({
 
   useFrame((_, delta) => {
     const agent = agentRef.current;
-
     const nowGrab = grabRef.current.active;
     grabActiveRef.current = nowGrab;
 
@@ -941,7 +1085,7 @@ function SceneRunner({
 /* ================================================================
    HUD overlays
 ================================================================ */
-function RewardPlot({ agentRef }: { agentRef: MutableRefObject<DQNAgent> }) {
+function RewardPlot({ agentRef, isAbsorbing }: { agentRef: MutableRefObject<DQNAgent>; isAbsorbing?: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [tick, setTick] = useState(0);
 
@@ -1037,7 +1181,13 @@ function RewardPlot({ agentRef }: { agentRef: MutableRefObject<DQNAgent> }) {
   }, [tick, agentRef]);
 
   return (
-    <div className="rounded-md border border-white/10 bg-black/45 backdrop-blur-sm px-3 py-2 min-w-[220px]">
+    <div
+      className="rounded-md border bg-black/45 backdrop-blur-sm px-3 py-2 min-w-[220px]"
+      style={{
+        borderColor: isAbsorbing ? "rgba(34,211,238,0.9)" : "rgba(255,255,255,0.1)",
+        animation: isAbsorbing ? "absorbBorder 1s ease-in-out infinite" : undefined,
+      }}
+    >
       <canvas ref={canvasRef} />
     </div>
   );
@@ -1116,6 +1266,13 @@ export default function PendulumScene() {
   const [showToast, setShowToast] = useState(false);
   const [overlayRoot, setOverlayRoot] = useState<HTMLElement | null>(null);
   const [trainMePos, setTrainMePos] = useState<{ x: number; y: number } | null>(null);
+  const [warmStartPos, setWarmStartPos] = useState<{ x: number; y: number } | null>(null);
+  const [warmStartApplied, setWarmStartApplied] = useState(false);
+  const [isAbsorbing, setIsAbsorbing] = useState(false);
+  const [absorbProgress, setAbsorbProgress] = useState(0);
+  const [absorbCount, setAbsorbCount] = useState(0);
+  const [warmPhase, setWarmPhase] = useState<"absorb" | "calibrate" | null>(null);
+  const [devReplaySize, setDevReplaySize] = useState(0);
   const eventSourceRef = useRef<HTMLElement>(null!);
 
   useEffect(() => {
@@ -1135,6 +1292,12 @@ export default function PendulumScene() {
   }, []);
 
   useEffect(() => {
+    if (process.env.NODE_ENV !== "development") return;
+    const id = setInterval(() => setDevReplaySize(engine.agent.getReplaySize()), 500);
+    return () => clearInterval(id);
+  }, [engine]);
+
+  useEffect(() => {
     const hero = document.getElementById("top");
     if (!hero) return;
     const el = document.createElement("div");
@@ -1149,6 +1312,99 @@ export default function PendulumScene() {
     engine.trainingStarted = true;
     engine.trainingStartTime = Date.now();
   }, [engine]);
+
+  const handleDownloadReplay = useCallback(() => {
+    const transitions = engine.agent.exportReplay(10000);
+    const weights = engine.agent.exportWeights();
+    const payload = {
+      _comment: `Captured from a ${engine.agent.converged ? "converged" : "in-progress"} run. Replace public/pendubot-warmstart-${PENDUBOT_MODE}.json with this file.`,
+      mode: PENDUBOT_MODE,
+      converged: engine.agent.converged,
+      weights,
+      transitions,
+    };
+    const blob = new Blob([JSON.stringify(payload)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `pendubot-warmstart-${PENDUBOT_MODE}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }, [engine]);
+
+  const handleWarmStart = useCallback(async () => {
+    if (warmStartApplied || isAbsorbing) return;
+    setIsAbsorbing(true);
+    setAbsorbProgress(0);
+    setWarmPhase("absorb");
+    try {
+      const res = await fetch(`/pendubot-warmstart-${PENDUBOT_MODE}.json`, { cache: "no-cache" });
+      if (!res.ok) throw new Error(`warm-start fetch ${res.status}`);
+      const data = (await res.json()) as {
+        transitions?: Array<{ o: number[]; a: number; r: number; n: number[] }>;
+        weights?: { online: number[][]; target: number[][] };
+      };
+      const transitions = data.transitions ?? [];
+      setAbsorbCount(transitions.length);
+      // Do NOT call startTraining() yet. While trainingActive is false,
+      // useFrame steps physics with torque=0 but skips recordVisibleStep,
+      // so nothing flails against the pre-load network before weights are
+      // swapped in. Training flips on at the end, after loadWeights +
+      // physics snap land.
+      const ABSORB_WEIGHT = data.weights ? 0.7 : 0.25;
+      if (transitions.length > 0) {
+        await engine.agent.injectBatch(transitions, {
+          chunkSize: 500,
+          onProgress: (done, total) =>
+            setAbsorbProgress(total > 0 ? (done / total) * ABSORB_WEIGHT : ABSORB_WEIGHT),
+        });
+      } else {
+        setAbsorbProgress(ABSORB_WEIGHT);
+      }
+      setWarmPhase("calibrate");
+      if (data.weights && engine.agent.loadWeights(data.weights)) {
+        // Weights loaded with a small sigma perturbation. No physics snap —
+        // the agent picks up control from wherever the pendulum currently
+        // is and swings up / stabilizes into balance under the loaded
+        // policy. Start a fresh episode counter so the stabilization
+        // window isn't polluted by pre-warm accumulated counters.
+        engine.agent.resetVisibleEpisode();
+        setAbsorbProgress(1);
+      } else {
+        // Fallback: no weights in the file → retrain the Q-net offline
+        // from the transition data (slow path, same as the original demo).
+        await engine.agent.warmStartTrain(6000, {
+          updatesPerFrame: 8,
+          onProgress: (done, total) =>
+            setAbsorbProgress(ABSORB_WEIGHT + (total > 0 ? (done / total) * (1 - ABSORB_WEIGHT) : 0)),
+        });
+      }
+      // Flip training on. From the next useFrame tick the agent acts under
+      // the newly-loaded (sigma-perturbed) weights and recordVisibleStep
+      // runs normal 16×/step updates, pulling the noisy weights back onto
+      // the good optimum. Convergence fires organically after 3
+      // consecutive episodes ≥ CONVERGE_FRAC (≈30 s at 20 Hz).
+      if (!engine.agent.trainingActive) {
+        engine.agent.startTraining();
+        if (!engine.trainingStarted) {
+          engine.trainingStarted = true;
+          engine.trainingStartTime = Date.now();
+          setTrainingStarted(true);
+        }
+      }
+      setWarmStartApplied(true);
+    } catch (e) {
+      console.warn("warm-start failed:", e);
+    } finally {
+      setTimeout(() => {
+        setIsAbsorbing(false);
+        setAbsorbProgress(0);
+        setWarmPhase(null);
+      }, 400);
+    }
+  }, [engine, warmStartApplied, isAbsorbing]);
 
   useEffect(() => {
     if (trainingDone) return;
@@ -1192,6 +1448,8 @@ export default function PendulumScene() {
         @keyframes trainMeBob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-10px); } }
         @keyframes trainMeArrow { 0%, 100% { transform: translateY(0); opacity: 1; } 50% { transform: translateY(6px); opacity: 0.6; } }
         @keyframes fadeInUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes warmStartPulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(34,211,238,0.55), 0 0 18px rgba(34,211,238,0.25); } 50% { box-shadow: 0 0 0 8px rgba(34,211,238,0), 0 0 28px rgba(34,211,238,0.5); } }
+        @keyframes absorbBorder { 0%, 100% { border-color: rgba(34,211,238,0.35); box-shadow: 0 0 12px rgba(34,211,238,0.25); } 50% { border-color: rgba(34,211,238,0.9); box-shadow: 0 0 22px rgba(34,211,238,0.6); } }
       `}</style>
       <Canvas
         className="absolute inset-0"
@@ -1209,6 +1467,7 @@ export default function PendulumScene() {
         <directionalLight position={[4, 5, 2]} intensity={0.9} color="#e8ecf5" />
         <hemisphereLight args={["#1a2540", "#0a0f1e", 0.25]} />
         <PivotProjector onPosition={setTrainMePos} />
+        <BaseProjector onPosition={setWarmStartPos} />
         <SceneRunner
           agentRef={agentRef}
           visibleEnvRef={visibleEnvRef}
@@ -1223,9 +1482,61 @@ export default function PendulumScene() {
       {overlayRoot && createPortal(
         <>
           <div className="absolute bottom-5 right-5 flex flex-col gap-2 items-end pointer-events-none">
-            {trainingStarted && <RewardPlot agentRef={agentRef} />}
+            {trainingStarted && <RewardPlot agentRef={agentRef} isAbsorbing={isAbsorbing} />}
             <StatsHud statsRef={statsRef} convergedRef={convergedRef} />
+            {process.env.NODE_ENV === "development" && (
+              <button
+                onClick={handleDownloadReplay}
+                disabled={devReplaySize < 500}
+                className="pointer-events-auto font-mono text-[9px] uppercase tracking-[0.16em] rounded-md px-3 py-1.5 border backdrop-blur-sm transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                style={{
+                  color: trainingDone ? "#fbbf24" : "#a78bfa",
+                  borderColor: trainingDone ? "rgba(251,191,36,0.55)" : "rgba(167,139,250,0.45)",
+                  background: "rgba(5,10,20,0.55)",
+                }}
+                title={`Download ${Math.min(10000, devReplaySize).toLocaleString()} sampled transitions as JSON (dev only)`}
+              >
+                ⬇ export replay · {devReplaySize.toLocaleString()}{trainingDone ? " ✦" : ""}
+              </button>
+            )}
           </div>
+
+          {trainingStarted && !warmStartApplied && !trainingDone && warmStartPos && (
+            <div
+              className="absolute pointer-events-auto"
+              style={{ left: `${warmStartPos.x}%`, top: `${warmStartPos.y}%`, transform: "translate(-50%, 0)" }}
+            >
+              <button
+                onClick={handleWarmStart}
+                disabled={isAbsorbing}
+                className="font-mono text-[10px] sm:text-[11px] uppercase tracking-[0.18em] rounded-full px-4 py-2 border backdrop-blur-sm transition-colors disabled:cursor-wait"
+                style={{
+                  color: "#22d3ee",
+                  borderColor: "rgba(34,211,238,0.55)",
+                  background: "rgba(5,10,20,0.55)",
+                  animation: isAbsorbing ? undefined : "warmStartPulse 2.4s ease-in-out infinite",
+                }}
+                title="Inject pre-baked experiences into replay so training starts near-converged"
+              >
+                {isAbsorbing ? (
+                  `${warmPhase === "calibrate" ? "Calibrating" : "Absorbing"}… ${Math.round(absorbProgress * 100)}%`
+                ) : (
+                  <span className="flex flex-col items-center leading-tight gap-0.5">
+                    <span>⚡ Warm-Start</span>
+                    <span className="text-[8px] sm:text-[9px] opacity-75 normal-case tracking-[0.12em]">(skip ahead)</span>
+                  </span>
+                )}
+              </button>
+            </div>
+          )}
+
+          {isAbsorbing && (
+            <div className="absolute top-20 left-1/2 -translate-x-1/2 rounded-full bg-gradient-to-r from-[#22d3ee]/20 to-[#7c5cff]/20 border border-[#22d3ee]/60 backdrop-blur px-5 py-2 text-[11px] font-mono uppercase tracking-[0.22em] text-[#22d3ee] shadow-[0_0_24px_rgba(34,211,238,0.35)] pointer-events-none">
+              {warmPhase === "calibrate"
+                ? "⚡ Calibrating Q-values…"
+                : `⚡ Absorbing ${absorbCount > 0 ? absorbCount.toLocaleString() + " " : ""}experiences…`}
+            </div>
+          )}
 
           {showTrainMe && trainMePos && (
             <div
@@ -1264,7 +1575,7 @@ export default function PendulumScene() {
           )}
 
           {showToast && (
-            <div className="absolute top-6 left-1/2 -translate-x-1/2 rounded-full bg-gradient-to-r from-[#fbbf24]/20 to-[#f59e0b]/20 border border-[#fbbf24]/60 backdrop-blur px-5 py-2 text-[11px] font-mono uppercase tracking-[0.22em] text-[#fbbf24] shadow-[0_0_30px_rgba(251,191,36,0.4)] animate-pulse pointer-events-none">
+            <div className="absolute top-20 left-1/2 -translate-x-1/2 rounded-full bg-gradient-to-r from-[#fbbf24]/20 to-[#f59e0b]/20 border border-[#fbbf24]/60 backdrop-blur px-5 py-2 text-[11px] font-mono uppercase tracking-[0.22em] text-[#fbbf24] shadow-[0_0_30px_rgba(251,191,36,0.4)] animate-pulse pointer-events-none">
               ✦ RL converged — balance mastered
             </div>
           )}

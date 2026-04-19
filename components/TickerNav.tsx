@@ -27,7 +27,7 @@ function TickerSet({
     <>
       {SECTIONS.map((s) => (
         <span key={s.id} className="inline-flex items-center shrink-0">
-          <span className="text-accent2/30 select-none px-10" aria-hidden>·</span>
+          <span className="text-accent2/30 select-none px-12" aria-hidden>·</span>
           <button
             type="button"
             onClick={() => goTo(s.id)}
@@ -42,7 +42,7 @@ function TickerSet({
         </span>
       ))}
       <span className="inline-flex items-center shrink-0">
-        <span className="text-accent2/30 select-none px-10" aria-hidden>·</span>
+        <span className="text-accent2/30 select-none px-12" aria-hidden>·</span>
         <button
           type="button"
           onClick={openContact}

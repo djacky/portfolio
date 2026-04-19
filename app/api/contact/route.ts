@@ -13,9 +13,12 @@
 ------------------------------------------------------------------ */
 
 import { NextRequest, NextResponse } from "next/server";
+import { clientIp } from "@/lib/request-helpers";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+const UPSTREAM_TIMEOUT_MS = 12_000;
 
 const MAX_NAME = 120;
 const MAX_EMAIL = 200;
@@ -82,14 +85,7 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const ip =
-    req.headers.get("x-forwarded-for")?.split(",")[0].trim() ??
-    req.headers.get("x-real-ip") ??
-    "anonymous";
-  const limit = rateLimit(ip);
-  if (!limit.ok) {
-    return NextResponse.json({ error: limit.reason }, { status: 429 });
-  }
+  const ip = clientIp(req);
 
   let body: {
     name?: unknown;
@@ -104,9 +100,16 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
   }
 
-  // Simple honeypot — bots auto-fill hidden fields.
+  // Simple honeypot — bots auto-fill hidden fields. Check this BEFORE
+  // touching the rate-limit bucket so a bot spam-flood doesn't burn the
+  // hourly quota for the actual user behind the same IP.
   if (typeof body.honeypot === "string" && body.honeypot.length > 0) {
     return NextResponse.json({ ok: true }, { status: 200 });
+  }
+
+  const limit = rateLimit(ip);
+  if (!limit.ok) {
+    return NextResponse.json({ error: limit.reason }, { status: 429 });
   }
 
   const name = typeof body.name === "string" ? body.name.trim() : "";
@@ -169,6 +172,8 @@ export async function POST(req: NextRequest) {
     </div>
   `.trim();
 
+  const ac = new AbortController();
+  const timeout = setTimeout(() => ac.abort(), UPSTREAM_TIMEOUT_MS);
   try {
     const upstream = await fetch("https://api.resend.com/emails", {
       method: "POST",
@@ -184,6 +189,7 @@ export async function POST(req: NextRequest) {
         text: textBody,
         html: htmlBody,
       }),
+      signal: ac.signal,
     });
 
     if (!upstream.ok) {
@@ -197,10 +203,13 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({ ok: true }, { status: 200 });
   } catch (err) {
-    console.error("[/api/contact] fetch failed:", err);
+    const aborted = (err as { name?: string })?.name === "AbortError";
+    console.error("[/api/contact] fetch failed:", aborted ? "timeout" : err);
     return NextResponse.json(
       { error: "Could not reach the email service. Try again in a moment." },
       { status: 502 },
     );
+  } finally {
+    clearTimeout(timeout);
   }
 }

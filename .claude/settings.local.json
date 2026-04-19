@@ -81,7 +81,17 @@
       "WebFetch(domain:danieltakeshi.github.io)",
       "WebFetch(domain:psc-g.github.io)",
       "Bash(./node_modules/.bin/tsc --noEmit)",
-      "Bash(node ./node_modules/typescript/bin/tsc --noEmit)"
+      "Bash(node ./node_modules/typescript/bin/tsc --noEmit)",
+      "Bash(./node_modules/.bin/tsc --noEmit -p tsconfig.json)",
+      "Bash(node ./node_modules/typescript/bin/tsc --noEmit -p tsconfig.json)",
+      "Bash(node ./node_modules/next/dist/bin/next lint --file components/PendulumScene.tsx)",
+      "Bash(node ./node_modules/next/dist/bin/next build)",
+      "Bash(node ./node_modules/typescript/bin/tsc --noEmit --noUnusedLocals)",
+      "Bash(node *)",
+      "Bash(\"C:\\\\Program Files\\\\nodejs\\\\node.exe\" \"node_modules/typescript/bin/tsc\" --noEmit)",
+      "Bash(git rm *)",
+      "Bash(\"C:\\\\Program Files\\\\nodejs\\\\node.exe\" \"node_modules/next/dist/bin/next\" lint)",
+      "Bash(cmd //c \"npx tsc --noEmit\")"
     ]
   }
 }

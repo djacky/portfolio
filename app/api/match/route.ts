@@ -21,9 +21,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { CANDIDATE_DOSSIER } from "@/lib/candidate-dossier";
 import { SUBMIT_ANALYSIS_TOOL, type MatchAnalysis } from "@/lib/match-schema";
+import { clientIp, looksLikePromptInjection } from "@/lib/request-helpers";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+const UPSTREAM_TIMEOUT_MS = 25_000;
 
 /* ---------------- config knobs ---------------- */
 
@@ -127,11 +130,7 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // best-effort IP for rate limiting
-  const ip =
-    req.headers.get("x-forwarded-for")?.split(",")[0].trim() ??
-    req.headers.get("x-real-ip") ??
-    "anonymous";
+  const ip = clientIp(req);
   const limit = rateLimit(ip);
   if (!limit.ok) {
     return NextResponse.json({ error: limit.reason }, { status: 429 });
@@ -157,6 +156,17 @@ export async function POST(req: NextRequest) {
       { status: 400 },
     );
   }
+  // Cheap prompt-injection screen. The system prompt + tool_choice already
+  // contain the model, but no reason to spend tokens on adversarial input.
+  if (looksLikePromptInjection(jd)) {
+    return NextResponse.json(
+      {
+        error:
+          "That doesn't look like a job description — please paste a real role posting.",
+      },
+      { status: 400 },
+    );
+  }
 
   // Wrap the JD in delimiters so the model treats it as data, not instructions.
   const userMessage = `Please analyze the following job description against the candidate dossier and submit your structured analysis using the submit_analysis tool.
@@ -166,6 +176,8 @@ ${jd}
 </job_description>`;
 
   let upstream: Response;
+  const ac = new AbortController();
+  const timeout = setTimeout(() => ac.abort(), UPSTREAM_TIMEOUT_MS);
   try {
     upstream = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -189,13 +201,17 @@ ${jd}
         tool_choice: { type: "tool", name: SUBMIT_ANALYSIS_TOOL.name },
         messages: [{ role: "user", content: userMessage }],
       }),
+      signal: ac.signal,
     });
   } catch (err) {
-    console.error("[/api/match] upstream fetch failed:", err);
+    const aborted = (err as { name?: string })?.name === "AbortError";
+    console.error("[/api/match] upstream fetch failed:", aborted ? "timeout" : err);
     return NextResponse.json(
       { error: "Could not reach the analysis service. Try again in a moment." },
       { status: 502 },
     );
+  } finally {
+    clearTimeout(timeout);
   }
 
   if (!upstream.ok) {

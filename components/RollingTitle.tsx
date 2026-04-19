@@ -14,8 +14,6 @@ const TITLES = [
   "Research Engineer.",
   "Backend Engineer.",
   "Control Systems Engineer.",
-  "Electrical Engineer.",
-  "Data Scientist.",
 ];
 
 const TYPE_SPEED = 55;       // ms per char when typing
