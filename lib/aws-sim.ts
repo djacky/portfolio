@@ -14,9 +14,9 @@
 
 export type Phase = "lobby" | "match" | "distribute" | "summary";
 
-export type IslandId = "ec2" | "pydantic" | "postgres" | "lambda" | "s3" | "gamelift";
+export type IslandId = "alb" | "ec2" | "postgres" | "sqs" | "lambda" | "s3" | "gamelift";
 
-export const ISLAND_IDS: IslandId[] = ["gamelift", "ec2", "pydantic", "postgres", "lambda", "s3"];
+export const ISLAND_IDS: IslandId[] = ["gamelift", "alb", "ec2", "postgres", "sqs", "lambda", "s3"];
 
 export interface PlayerState {
   id: number;
@@ -48,18 +48,22 @@ export interface PlayerState {
 export interface Particle {
   id: number;
   kind:
-    | "join"        // player → ec2
+    | "ingress"     // player → alb (incoming HTTP)
+    | "route"       // alb → ec2 (routed request)
+    | "join"        // legacy alias — player → ec2 (kept for any stale callers)
     | "perf"        // player → gamelift (session telemetry)
-    | "valid"       // ec2 → pydantic (intermediate)
-    | "write"       // pydantic → postgres
+    | "write"       // ec2 → postgres (bet escrow / balance write)
+    | "sns"         // ec2 → sqs (SNS publish → SQS queue)
+    | "sqsDeliver"  // sqs → lambda (queue consumer)
     | "elim"        // player → gamelift (session event)
     | "s3chunk"     // gamelift → s3 (replay chunk upload)
     | "batch"       // gamelift → ec2 (match-end bulk transfer)
     | "snapshot"    // postgres → lambda (match dataset on end)
     | "payout"      // lambda → player
+    | "refund"      // lambda → player (void refund, idempotent)
     | "ledger"      // lambda → s3
     | "balance"     // lambda → postgres
-    | "reject";     // pydantic → ec2 (rejected validation, bounces back)
+    | "reject";     // alb/ec2 bounce (validation 422)
   fromKind: "player" | IslandId;
   fromIdx: number; // when fromKind=player
   toKind: "player" | IslandId;
@@ -89,9 +93,10 @@ export interface S3Object {
 }
 
 export interface InfraHealth {
+  alb: boolean;
   ec2: boolean;
-  pydantic: boolean;
   postgres: boolean;
+  sqs: boolean;
   s3: boolean;
   lambda: boolean;   // false during phases 1 & 2; true during phase 3
   gamelift: boolean; // managed fleet — always provisioned, active during match
@@ -135,6 +140,9 @@ export interface Snapshot {
 
   /** active chaos banners (rendered at top of canvas) */
   chaosBanners: ChaosBanner[];
+
+  /** Set on GameLift crash — match is voided and all stakes refunded. */
+  matchVoided: boolean;
 }
 
 /** platform-wide fleet state — animates under load + chaos */
@@ -150,7 +158,7 @@ export interface FleetState {
 
 export interface ChaosBanner {
   id: number;
-  kind: "gamelift-drop" | "lambda-timeout" | "ec2-fail";
+  kind: "gamelift-drop" | "lambda-timeout" | "ec2-fail" | "match-void";
   headline: string;                // short, e.g. "GAMELIFT FLEET-02 CRASHED"
   detail: string;                  // "restoring 47 events from replay_chunk_T"
   startedAt: number;
@@ -192,7 +200,7 @@ export class MatchSim {
   private s3Counter = 0;
   private prizePool = 0;
   private prizePoolGlowUntil = 0;
-  private islandHeat: Record<IslandId, number> = { ec2: 0, pydantic: 0, postgres: 0, lambda: 0, s3: 0, gamelift: 0 };
+  private islandHeat: Record<IslandId, number> = { alb: 0, ec2: 0, postgres: 0, sqs: 0, lambda: 0, s3: 0, gamelift: 0 };
   private log: LogEntry[] = [];
   private completionsForRps: number[] = [];
   private rpsHistory: number[] = [];
@@ -231,10 +239,15 @@ export class MatchSim {
   private chaosBanners: ChaosBanner[] = [];
   private bannerCounter = 0;
   /** chaos state — drives recovery animations */
-  private gameliftRecoveryAt: number | null = null;
   private lambdaRetryAt: number | null = null;
   private ec2FailAt: number | null = null;
   private ec2RespawnAt: number | null = null;
+  /** Void/refund sequence state — set by triggerGameLiftDrop. */
+  private matchVoided = false;
+  private refundsFiredAt: number | null = null;
+  private voidSummaryAt: number | null = null;
+  /** monotonic counter feeding idempotency keys on retried requests */
+  private idempCounter = 0;
 
   constructor() {
     this.players = this.makePlayers();
@@ -254,23 +267,41 @@ export class MatchSim {
   }
 
   triggerBadPayload() {
-    // fires a rejected-bet particle: ec2 → pydantic (red) → bounces back.
-    // Only meaningful in lobby — during match, telemetry goes to GameLift, not our API.
+    // Fires a malformed bet along the same path a real one takes:
+    // player → ALB → EC2. Pydantic validation inside EC2 rejects it with
+    // a 422, and a red reject particle bounces back to the player.
     if (this.phase !== "lobby") return;
-    this.bumpHeat("ec2", 0.55);
-    this.bumpHeat("pydantic", 0.85);
     this.spawnParticle({
-      kind: "reject",
-      fromKind: "ec2", fromIdx: 0,
-      toKind: "pydantic", toIdx: 0,
-      travelMs: 350,
-      color: "#f87171",
+      kind: "ingress",
+      fromKind: "player", fromIdx: 0,
+      toKind: "alb", toIdx: 0,
+      travelMs: PARTICLE_TRAVEL_MS * 0.45, color: "#22d3ee",
       label: "amount: -50",
     });
-    this.appendLog({
-      method: "POST", path: "/match/join",
-      status: 422, latencyMs: Math.round(rand(3, 7)),
-      detail: "ValidationError: amount > 0",
+    setTimeoutSim(this, PARTICLE_TRAVEL_MS * 0.45, () => {
+      this.bumpHeat("alb", 0.55);
+      this.spawnParticle({
+        kind: "route",
+        fromKind: "alb", fromIdx: 0,
+        toKind: "ec2", toIdx: 0,
+        travelMs: PARTICLE_TRAVEL_MS * 0.45, color: "#fb923c",
+      });
+    });
+    setTimeoutSim(this, PARTICLE_TRAVEL_MS * 0.9, () => {
+      this.bumpHeat("ec2", 0.75);
+      this.spawnParticle({
+        kind: "reject",
+        fromKind: "ec2", fromIdx: 0,
+        toKind: "player", toIdx: 0,
+        travelMs: 550,
+        color: "#f87171",
+        label: "422",
+      });
+      this.appendLog({
+        method: "POST", path: "/match/join",
+        status: 422, latencyMs: Math.round(rand(3, 7)),
+        detail: "ValidationError: amount > 0",
+      });
     });
   }
 
@@ -282,29 +313,150 @@ export class MatchSim {
 
   /* ---- chaos triggers (senior-signal scenarios) ---- */
 
-  /** GameLift fleet instance crashes mid-match. Recovery: buffered events
-   *  restored from last S3 replay checkpoint, session resumes on a sibling. */
+  /** GameLift fleet instance crashes mid-match. Realistic recovery:
+   *  without the complete session buffer we can't score the match fairly,
+   *  so we VOID it and refund all 30 stakes via SNS → SQS → Lambda,
+   *  each refund carrying an idempotency key so retries can't double-pay. */
   triggerGameLiftDrop() {
     if (this.phase !== "match") return;
-    if (this.gameliftRecoveryAt !== null) return; // don't stack
-    const restoredEvents = Math.min(this.bufferedEvents, Math.floor(rand(30, 80)));
+    if (this.matchVoided) return; // don't stack
+    this.matchVoided = true;
+
     this.pushBanner({
-      kind: "gamelift-drop",
-      headline: "GAMELIFT FLEET-02 CRASHED",
-      detail: `restoring ${restoredEvents} events from replay_chunk_T · session migrating to fleet-05`,
-      durationMs: 4200,
+      kind: "match-void",
+      headline: "GAMELIFT FLEET-02 CRASHED · MATCH VOIDED",
+      detail: "session buffer unrecoverable · refunding 30 stakes",
+      durationMs: 5500,
       tone: "danger",
     });
     this.appendLog({
       method: "GL", path: "fleet-02.crash",
       status: 503, latencyMs: 0,
-      detail: "EC2 health-check fail",
+      detail: "session buffer lost",
     });
-    // flash — gamelift heat spikes then dips
     this.bumpHeat("gamelift", 1);
     this.fleet.albReroutes += 1;
-    // recovery: 1.5s later, an S3 → GameLift restore particle fires
-    this.gameliftRecoveryAt = this.sim_now + 1500;
+
+    // Beat 1 (+200ms): EC2 publishes match.voided to SNS → SQS.
+    // 1 fan-out message + 30 per-player refund jobs briefly pile up.
+    setTimeoutSim(this, 200, () => {
+      this.bumpHeat("ec2", 0.7);
+      this.spawnParticle({
+        kind: "sns",
+        fromKind: "ec2", fromIdx: 0,
+        toKind: "sqs", toIdx: 0,
+        travelMs: 500, color: "#34d399",
+        label: "match.voided",
+      });
+      this.fleet.sqsBacklog += 31;
+      this.appendLog({
+        method: "POST", path: "/sns/match.voided",
+        status: 200, latencyMs: 3,
+        detail: "fan-out → wallet",
+      });
+    });
+
+    // Beat 2 (+900ms): SQS delivers to Lambda (wallet consumer).
+    // Drain the 1 fan-out message; the 30 refund jobs drain as Lambda processes them.
+    setTimeoutSim(this, 900, () => {
+      this.bumpHeat("sqs", 0.95);
+      this.fleet.sqsBacklog = Math.max(0, this.fleet.sqsBacklog - 1);
+      this.spawnParticle({
+        kind: "sqsDeliver",
+        fromKind: "sqs", fromIdx: 0,
+        toKind: "lambda", toIdx: 0,
+        travelMs: 550, color: "#34d399",
+        label: "refund batch",
+      });
+    });
+
+    // Beat 3 (+1500ms): Lambda fans out 30 idempotent refunds
+    setTimeoutSim(this, 1500, () => {
+      this.refundsFiredAt = this.sim_now;
+      this.bumpHeat("lambda", 1);
+      this.appendLog({
+        method: "POST", path: "/wallet/refund×30",
+        status: 200, latencyMs: Math.round(rand(140, 210)),
+        detail: "idempotent · all stakes returned",
+      });
+      for (let i = 0; i < this.players.length; i++) {
+        const p = this.players[i];
+        if (p.joinedAt === null) continue;
+        const offset = i * 22;
+        setTimeoutSim(this, offset, () => {
+          this.spawnParticle({
+            kind: "refund",
+            fromKind: "lambda", fromIdx: 0,
+            toKind: "player", toIdx: i,
+            travelMs: 800 + i * 10,
+            color: "#34d399",
+            amount: p.bet,
+            label: `idemp:void_${i}`,
+          });
+        });
+        setTimeoutSim(this, offset + 820 + i * 10, () => {
+          p.payout = p.bet; // refund returns stake
+          p.payoutFlashUntil = this.sim_now + 1000;
+          p.flashColor = "#34d399";
+          p.flashUntil = this.sim_now + 900;
+          // Lambda acked the refund job → one less message in the queue.
+          this.fleet.sqsBacklog = Math.max(0, this.fleet.sqsBacklog - 1);
+          this.completionsForRps.push(this.sim_now);
+        });
+      }
+    });
+
+    // Beat 4 (+2800ms): Lambda updates Postgres (match.status=voided)
+    setTimeoutSim(this, 2800, () => {
+      this.spawnParticle({
+        kind: "balance",
+        fromKind: "lambda", fromIdx: 0,
+        toKind: "postgres", toIdx: 0,
+        travelMs: 650, color: "#3b82f6",
+        label: "UPDATE match.status=voided",
+      });
+      this.bumpHeat("postgres", 1);
+      this.appendLog({
+        method: "PUT", path: "/db/match.status",
+        status: 200, latencyMs: 22,
+        detail: "voided",
+      });
+    });
+
+    // Beat 5 (+3400ms): Lambda writes void ledger to S3 · drain pool
+    setTimeoutSim(this, 3400, () => {
+      this.spawnParticle({
+        kind: "ledger",
+        fromKind: "lambda", fromIdx: 0,
+        toKind: "s3", toIdx: 0,
+        travelMs: 700, color: "#a78bfa",
+        label: "void_ledger.json",
+      });
+      this.bumpHeat("s3", 0.9);
+      this.s3Objects.push({
+        id: ++this.s3Counter,
+        createdAt: this.sim_now,
+        kind: "ledger",
+        label: "match.void_ledger.json",
+      });
+      this.appendLog({
+        method: "PUT", path: "/s3/match.void",
+        status: 200, latencyMs: 38,
+      });
+      this.prizePool = 0;
+    });
+
+    // Beat 6 (+5200ms): confirmation banner · flag summary transition
+    setTimeoutSim(this, 5200, () => {
+      this.pushBanner({
+        kind: "match-void",
+        headline: "REFUNDS COMPLETE · 30 STAKES RETURNED",
+        detail: "match voided idempotently · no double-pay",
+        durationMs: 4500,
+        tone: "good",
+      });
+      this.voidSummaryAt = this.sim_now;
+    });
   }
 
   /** Lambda payout invocation times out. Recovery: message parks in SQS DLQ,
@@ -330,16 +482,21 @@ export class MatchSim {
     this.lambdaRetryAt = this.sim_now + 2000;
   }
 
-  /** EC2 pod fails health check. Recovery: ALB stops routing to it,
-   *  ASG spawns a replacement, DesiredCapacity holds steady. */
+  /** EC2 pod fails health check. In addition to the usual ALB drain + ASG
+   *  replacement, the more interesting case is: if a request was in-flight
+   *  on the dying pod, the client sees a 502 / upstream reset. ALB retries
+   *  the request on a healthy sibling, and because the client (or the ALB
+   *  sticky layer) attached an idempotency key, the retry commits exactly
+   *  once. That's the property we actually care about in production. */
   triggerEc2PodFail() {
     if (this.ec2FailAt !== null) return;
     this.ec2FailAt = this.sim_now;
     this.fleet.ec2Pods = Math.max(1, this.fleet.ec2Pods - 1);
     this.fleet.albReroutes += 1;
+    const podId = (Math.random() * 1000).toFixed(0).padStart(3, "0");
     this.pushBanner({
       kind: "ec2-fail",
-      headline: `EC2 POD api-${(Math.random() * 1000).toFixed(0).padStart(3, "0")} UNHEALTHY`,
+      headline: `EC2 POD api-${podId} UNHEALTHY`,
       detail: `ALB draining · ASG scaling ${this.fleet.ec2Pods}→${this.fleet.ec2PodsDesired} · replacement spawning`,
       durationMs: 5000,
       tone: "warn",
@@ -347,8 +504,21 @@ export class MatchSim {
     this.appendLog({
       method: "GET", path: "/health",
       status: 503, latencyMs: 29,
-      detail: "ALB target drained",
+      detail: `api-${podId} · ALB target drained`,
     });
+
+    // During lobby we have live HTTP traffic on EC2 (during match, telemetry
+    // bypasses the API and goes to GameLift). If a join is about to fire,
+    // route it through the dying pod so the user can watch the 502 → retry
+    // sequence play out with no double-charge.
+    if (this.phase === "lobby" && this.joinIdx < PLAYER_COUNT) {
+      const victimIdx = this.joinIdx;
+      this.joinIdx += 1;
+      this.nextJoinAt = this.sim_now + 240; // keep the next regular join paced
+      const key = `bet_${(++this.idempCounter).toString(36)}_${victimIdx.toString(36)}`;
+      this.fireInFlightRetry(victimIdx, key, podId);
+    }
+
     // recovery: ASG spawns replacement in 2.5s
     this.ec2RespawnAt = this.sim_now + 2500;
   }
@@ -361,7 +531,7 @@ export class MatchSim {
     this.particles = [];
     this.prizePool = 0;
     this.prizePoolGlowUntil = 0;
-    this.islandHeat = { ec2: 0, pydantic: 0, postgres: 0, lambda: 0, s3: 0, gamelift: 0 };
+    this.islandHeat = { alb: 0, ec2: 0, postgres: 0, sqs: 0, lambda: 0, s3: 0, gamelift: 0 };
     this.log = [];
     this.completionsForRps = [];
     this.rpsHistory = [];
@@ -375,10 +545,12 @@ export class MatchSim {
     this.payoutsFiredAt = null;
     this.bufferedEvents = 0;
     this.chaosBanners = [];
-    this.gameliftRecoveryAt = null;
     this.lambdaRetryAt = null;
     this.ec2FailAt = null;
     this.ec2RespawnAt = null;
+    this.matchVoided = false;
+    this.refundsFiredAt = null;
+    this.voidSummaryAt = null;
     this.fleet = {
       concurrentMatches: 47,
       ec2Pods: 8,
@@ -481,17 +653,18 @@ export class MatchSim {
       particles: this.particles,
       islandHeat: { ...this.islandHeat },
       islandActive: {
+        alb: this.islandHeat.alb > 0.05,
         ec2: this.islandHeat.ec2 > 0.05,
-        pydantic: this.islandHeat.pydantic > 0.05,
         postgres: this.islandHeat.postgres > 0.05,
-        lambda: this.phase === "distribute" || this.phase === "summary",
+        sqs: this.islandHeat.sqs > 0.05,
+        lambda: this.phase === "distribute" || this.phase === "summary" || this.islandHeat.lambda > 0.05,
         s3: this.islandHeat.s3 > 0.05,
         gamelift: this.phase === "match" || this.islandHeat.gamelift > 0.05,
       },
       health: {
-        ec2: true, pydantic: true, postgres: true, s3: true,
-        lambda: this.phase === "distribute" || this.phase === "summary",
-        gamelift: true, // managed fleet always provisioned
+        alb: true, ec2: true, postgres: true, sqs: true, s3: true,
+        lambda: this.phase === "distribute" || this.phase === "summary" || this.matchVoided,
+        gamelift: !this.matchVoided, // GameLift crash flips this off until recovery
       },
       log: [...this.log],
       rps: this.completionsForRps.length,
@@ -502,6 +675,7 @@ export class MatchSim {
       showPoolLockFlash: this.showPoolLockFlash,
       fleet: { ...this.fleet },
       chaosBanners: [...this.chaosBanners],
+      matchVoided: this.matchVoided,
     };
   }
 
@@ -621,6 +795,15 @@ export class MatchSim {
   }
 
   private tickMatch() {
+    // If the match was voided mid-play, skip the distribute phase entirely —
+    // the void/refund sequence has already fanned out through SNS→SQS→Lambda.
+    // Once the final banner fires (voidSummaryAt), flip to summary.
+    if (this.matchVoided) {
+      if (this.voidSummaryAt !== null && this.sim_now - this.voidSummaryAt > 1800) {
+        this.transition("summary");
+      }
+      return;
+    }
     const phaseElapsed = this.sim_now - this.phaseStarted;
     // stream performance events at increasing rate (heat-up)
     const intensity = clamp01(phaseElapsed / MATCH_DURATION_MS);
@@ -669,39 +852,55 @@ export class MatchSim {
       });
     }
 
-    // Beat 2 (1400..2800ms): EC2 receives → pyd validate → postgres bulk
-    // insert. One validation hop, one bulk write — not 2k of them.
+    // Beat 2 (1400..2800ms): EC2 unpacks the batch, pydantic validates the
+    // envelope inside the process, then a single bulk INSERT lands in
+    // Postgres. In parallel, EC2 publishes `match.ended` to SNS → SQS so
+    // the scoring lambda can trigger without EC2 having to wait.
     if (this.batchTransferAt !== null && this.bulkWriteAt === null && elapsed > 1450) {
       this.bulkWriteAt = this.sim_now;
       this.bumpHeat("ec2", 0.9);
       this.spawnParticle({
-        kind: "valid",
+        kind: "write",
         fromKind: "ec2", fromIdx: 0,
-        toKind: "pydantic", toIdx: 0,
-        travelMs: 400, color: "#34d399",
+        toKind: "postgres", toIdx: 0,
+        travelMs: 500, color: "#3b82f6",
+        label: `INSERT events ×${eventCount}`,
       });
-      setTimeoutSim(this, 450, () => {
-        this.bumpHeat("pydantic", 1);
-        this.spawnParticle({
-          kind: "write",
-          fromKind: "pydantic", fromIdx: 0,
-          toKind: "postgres", toIdx: 0,
-          travelMs: 500, color: "#3b82f6",
-          label: "INSERT events ×N",
-        });
+      this.spawnParticle({
+        kind: "sns",
+        fromKind: "ec2", fromIdx: 0,
+        toKind: "sqs", toIdx: 0,
+        travelMs: 450, color: "#34d399",
+        label: "match.ended",
+      });
+      setTimeoutSim(this, 500, () => {
+        this.bumpHeat("postgres", 1);
+        this.bumpHeat("sqs", 0.85);
+        // match.ended fans out to scoring, payout, and ledger queues.
+        this.fleet.sqsBacklog += 3;
         this.appendLog({
           method: "PUT", path: "/db/match_events×N",
           status: 200, latencyMs: Math.round(rand(55, 95)),
           detail: `bulk ${eventCount}`,
         });
-      });
-      setTimeoutSim(this, 1000, () => {
-        this.bumpHeat("postgres", 1);
+        this.appendLog({
+          method: "POST", path: "/sns/match.ended",
+          status: 200, latencyMs: 3,
+          detail: "fan-out → scoring",
+        });
       });
     }
 
-    // Beat 3 (3200..4200ms): cold Lambda pulls the match dataset from pg.
+    // Beat 3 (3200..4200ms): SQS triggers the cold Lambda; Lambda reads
+    // the match dataset back from Postgres for scoring.
     if (elapsed > 3200 && this.particles.every((p) => p.kind !== "snapshot") && this.payoutsFiredAt === null && elapsed < 3700) {
+      this.spawnParticle({
+        kind: "sqsDeliver",
+        fromKind: "sqs", fromIdx: 0,
+        toKind: "lambda", toIdx: 0,
+        travelMs: 600, color: "#34d399",
+        label: "match.ended",
+      });
       this.spawnParticle({
         kind: "snapshot",
         fromKind: "postgres", fromIdx: 0,
@@ -709,6 +908,7 @@ export class MatchSim {
         travelMs: 900, color: "#3b82f6",
         label: "match dataset",
       });
+      this.bumpHeat("sqs", 0.7);
       this.bumpHeat("postgres", 0.9);
       this.bumpHeat("lambda", 0.5);
       this.appendLog({ method: "GET", path: "/db/match.snapshot", status: 200, latencyMs: 28 });
@@ -743,38 +943,162 @@ export class MatchSim {
     p.joinedAt = this.sim_now;
     p.pulseUntil = this.sim_now + 600;
 
-    // particle: player → ec2
+    // Beat 1: player → ALB ingress
     this.spawnParticle({
-      kind: "join",
+      kind: "ingress",
       fromKind: "player", fromIdx: idx,
-      toKind: "ec2", toIdx: 0,
-      travelMs: PARTICLE_TRAVEL_MS, color: "#22d3ee",
+      toKind: "alb", toIdx: 0,
+      travelMs: PARTICLE_TRAVEL_MS * 0.45, color: "#22d3ee",
       label: `join +$${p.bet}`,
     });
-    // chain: ec2 → pydantic → postgres after small delay
-    setTimeoutSim(this, PARTICLE_TRAVEL_MS, () => {
+    // Beat 2: ALB → EC2 (routed request, pydantic validates inside)
+    setTimeoutSim(this, PARTICLE_TRAVEL_MS * 0.45, () => {
+      this.bumpHeat("alb", 0.55);
+      this.spawnParticle({
+        kind: "route",
+        fromKind: "alb", fromIdx: 0,
+        toKind: "ec2", toIdx: 0,
+        travelMs: PARTICLE_TRAVEL_MS * 0.45, color: "#fb923c",
+      });
+    });
+    // Beat 3a: EC2 → Postgres (escrow write, synchronous)
+    setTimeoutSim(this, PARTICLE_TRAVEL_MS * 0.9, () => {
       this.bumpHeat("ec2", 0.6);
       this.spawnParticle({
-        kind: "valid", fromKind: "ec2", fromIdx: 0,
-        toKind: "pydantic", toIdx: 0,
-        travelMs: 350, color: "#34d399",
-      });
-    });
-    setTimeoutSim(this, PARTICLE_TRAVEL_MS + 400, () => {
-      this.bumpHeat("pydantic", 0.7);
-      this.spawnParticle({
-        kind: "write", fromKind: "pydantic", fromIdx: 0,
+        kind: "write",
+        fromKind: "ec2", fromIdx: 0,
         toKind: "postgres", toIdx: 0,
-        travelMs: 500, color: "#3b82f6",
+        travelMs: 450, color: "#3b82f6",
+        label: "INSERT bet.escrow",
       });
     });
-    setTimeoutSim(this, PARTICLE_TRAVEL_MS + 900, () => {
+    // Beat 3b: EC2 → SNS/SQS (async fan-out: bet.placed → wallet, notify)
+    setTimeoutSim(this, PARTICLE_TRAVEL_MS * 0.9 + 40, () => {
+      this.spawnParticle({
+        kind: "sns",
+        fromKind: "ec2", fromIdx: 0,
+        toKind: "sqs", toIdx: 0,
+        travelMs: 450, color: "#34d399",
+        label: "bet.placed",
+      });
+    });
+    // Beat 4: commit lands → pool updates, 200 logged.
+    // SNS → SQS fans `bet.placed` out to wallet + notify queues (≈2 msgs each).
+    setTimeoutSim(this, PARTICLE_TRAVEL_MS * 0.9 + 500, () => {
       this.bumpHeat("postgres", 0.6);
+      this.bumpHeat("sqs", 0.45);
+      this.fleet.sqsBacklog += 2;
       this.prizePool += p.bet;
       this.appendLog({
         method: "POST", path: "/match/join",
         status: 200, latencyMs: Math.round(rand(8, 16)),
         detail: `${p.name} +$${p.bet}`,
+      });
+      this.completionsForRps.push(this.sim_now);
+    });
+  }
+
+  /** In-flight bet caught by an EC2 pod that's being drained.
+   *  Attempt 1 → 502 from the dying pod. Attempt 2 → ALB retries on a
+   *  healthy sibling with the same `Idempotency-Key` header, so the write
+   *  commits exactly once. Client sees one success, no double-charge. */
+  private fireInFlightRetry(idx: number, idempKey: string, deadPodId: string) {
+    const p = this.players[idx];
+    // Mark the player as in-lobby so their orb is visible to flash on the 502.
+    p.joinedAt = this.sim_now;
+    p.pulseUntil = this.sim_now + 400;
+
+    /* ---------------- Attempt 1: dies on the draining pod ---------------- */
+    this.spawnParticle({
+      kind: "ingress",
+      fromKind: "player", fromIdx: idx,
+      toKind: "alb", toIdx: 0,
+      travelMs: PARTICLE_TRAVEL_MS * 0.4, color: "#22d3ee",
+      label: `idemp:${idempKey}`,
+    });
+    setTimeoutSim(this, PARTICLE_TRAVEL_MS * 0.4, () => {
+      this.bumpHeat("alb", 0.5);
+      this.spawnParticle({
+        kind: "route",
+        fromKind: "alb", fromIdx: 0,
+        toKind: "ec2", toIdx: 0,
+        travelMs: PARTICLE_TRAVEL_MS * 0.4, color: "#fb923c",
+      });
+    });
+    setTimeoutSim(this, PARTICLE_TRAVEL_MS * 0.85, () => {
+      this.spawnParticle({
+        kind: "reject",
+        fromKind: "ec2", fromIdx: 0,
+        toKind: "player", toIdx: idx,
+        travelMs: 450, color: "#f87171",
+        label: "502",
+      });
+      p.flashColor = "#f87171";
+      p.flashUntil = this.sim_now + 550;
+      this.appendLog({
+        method: "POST", path: "/match/join",
+        status: 502, latencyMs: Math.round(rand(22, 38)),
+        detail: `api-${deadPodId} · upstream reset · idemp:${idempKey}`,
+      });
+    });
+
+    /* ---------------- Attempt 2: ALB retries on a healthy sibling -------- */
+    const RETRY_AT = 1500;
+    setTimeoutSim(this, RETRY_AT, () => {
+      this.fleet.albReroutes += 1;
+      this.pushBanner({
+        kind: "ec2-fail",
+        headline: "REQUEST RETRIED · idempotent",
+        detail: `idemp:${idempKey} re-routed to a healthy pod · client sees exactly one success`,
+        durationMs: 3500,
+        tone: "good",
+      });
+      this.spawnParticle({
+        kind: "ingress",
+        fromKind: "player", fromIdx: idx,
+        toKind: "alb", toIdx: 0,
+        travelMs: PARTICLE_TRAVEL_MS * 0.4, color: "#22d3ee",
+        label: `retry ${idempKey}`,
+      });
+    });
+    setTimeoutSim(this, RETRY_AT + PARTICLE_TRAVEL_MS * 0.4, () => {
+      this.bumpHeat("alb", 0.55);
+      this.spawnParticle({
+        kind: "route",
+        fromKind: "alb", fromIdx: 0,
+        toKind: "ec2", toIdx: 0,
+        travelMs: PARTICLE_TRAVEL_MS * 0.4, color: "#fb923c",
+      });
+    });
+    setTimeoutSim(this, RETRY_AT + PARTICLE_TRAVEL_MS * 0.85, () => {
+      this.bumpHeat("ec2", 0.7);
+      this.spawnParticle({
+        kind: "write",
+        fromKind: "ec2", fromIdx: 0,
+        toKind: "postgres", toIdx: 0,
+        travelMs: 450, color: "#3b82f6",
+        label: `INSERT bet.escrow idemp:${idempKey}`,
+      });
+      this.spawnParticle({
+        kind: "sns",
+        fromKind: "ec2", fromIdx: 0,
+        toKind: "sqs", toIdx: 0,
+        travelMs: 450, color: "#34d399",
+        label: "bet.placed",
+      });
+    });
+    setTimeoutSim(this, RETRY_AT + PARTICLE_TRAVEL_MS * 0.85 + 500, () => {
+      this.bumpHeat("postgres", 0.7);
+      this.bumpHeat("sqs", 0.5);
+      this.fleet.sqsBacklog += 2;
+      this.prizePool += p.bet;
+      p.pulseUntil = this.sim_now + 600;
+      p.flashColor = "#34d399";
+      p.flashUntil = this.sim_now + 900;
+      this.appendLog({
+        method: "POST", path: "/match/join",
+        status: 200, latencyMs: Math.round(rand(52, 84)),
+        detail: `${p.name} +$${p.bet} · retry ok · idemp:${idempKey}`,
       });
       this.completionsForRps.push(this.sim_now);
     });
@@ -917,6 +1241,8 @@ export class MatchSim {
         p.payoutFlashUntil = this.sim_now + 1100;
         p.flashColor = "#34d399";
         p.flashUntil = this.sim_now + 900;
+        // wallet + notify jobs ack for this player — 2 messages off the queue.
+        this.fleet.sqsBacklog = Math.max(0, this.fleet.sqsBacklog - 2);
       });
     }
   }
@@ -1028,34 +1354,6 @@ export class MatchSim {
 
   /** Fires the recovery beats once the chaos timers elapse. */
   private handleChaosRecovery() {
-    // GameLift: S3 replay → fleet restore particle
-    if (this.gameliftRecoveryAt !== null && this.sim_now >= this.gameliftRecoveryAt) {
-      this.gameliftRecoveryAt = null;
-      this.spawnParticle({
-        kind: "s3chunk", // reuse visual — yellow wire
-        fromKind: "s3", fromIdx: 0,
-        toKind: "gamelift", toIdx: 0,
-        travelMs: 900, color: "#fbbf24",
-        label: "replay restore",
-      });
-      this.bumpHeat("s3", 0.8);
-      setTimeoutSim(this, 950, () => {
-        this.bumpHeat("gamelift", 0.9);
-        this.pushBanner({
-          kind: "gamelift-drop",
-          headline: "SESSION MIGRATED · fleet-05",
-          detail: "replay restored · no data loss · match resuming",
-          durationMs: 3500,
-          tone: "good",
-        });
-        this.appendLog({
-          method: "GL", path: "fleet-05.resume",
-          status: 200, latencyMs: 142,
-          detail: "state restored",
-        });
-      });
-    }
-
     // Lambda: retry with idempotency key succeeds
     if (this.lambdaRetryAt !== null && this.sim_now >= this.lambdaRetryAt) {
       this.lambdaRetryAt = null;
@@ -1148,10 +1446,11 @@ MatchSim.prototype.step = function (dtMs: number) {
 /* -------- island display metadata -------- */
 
 export const ISLAND_META: Record<IslandId, { label: string; sub: string; color: string }> = {
-  gamelift: { label: "AWS GameLift",    sub: "session telemetry", color: "#f472b6" },
-  ec2:      { label: "EC2 · FastAPI",   sub: "uvicorn / async",   color: "#fb923c" },
-  pydantic: { label: "Pydantic",        sub: "schema validate",   color: "#34d399" },
-  postgres: { label: "RDS Postgres",    sub: "SQLAlchemy ORM",    color: "#3b82f6" },
-  lambda:   { label: "Lambda Cluster",  sub: "rank() · payout()", color: "#fbbf24" },
-  s3:       { label: "S3 Vault",        sub: "replays · ledger",  color: "#a78bfa" },
+  gamelift: { label: "AWS GameLift",    sub: "session telemetry",        color: "#f472b6" },
+  alb:      { label: "Application LB",  sub: "ingress · health checks",  color: "#22d3ee" },
+  ec2:      { label: "EC2 · FastAPI",   sub: "uvicorn · pydantic",       color: "#fb923c" },
+  postgres: { label: "RDS Postgres",    sub: "SQLAlchemy · SERIALIZABLE", color: "#3b82f6" },
+  sqs:      { label: "SNS → SQS",       sub: "event fan-out · DLQ",      color: "#34d399" },
+  lambda:   { label: "Lambda Cluster",  sub: "rank · payout · refund",   color: "#fbbf24" },
+  s3:       { label: "S3 Vault",        sub: "replays · ledger",         color: "#a78bfa" },
 };

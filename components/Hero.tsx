@@ -25,17 +25,9 @@ function formatInt(n: number): string {
   return n.toLocaleString("en-US");
 }
 
-function formatTime(seconds: number): string {
-  const m = Math.floor(seconds / 60);
-  const s = seconds % 60;
-  return `${m}:${String(s).padStart(2, "0")}`;
-}
-
 function buildCredentials(stats: SiteStats | null): ReactNode[] {
   if (!stats) return STATIC_CREDENTIALS;
-  const trainLine = stats.bestTime
-    ? `${formatInt(stats.trainings)} pendulums trained globally · best time ${formatTime(stats.bestTime)}`
-    : `${formatInt(stats.trainings)} pendulums trained globally`;
+  const trainLine = `${formatInt(stats.trainings)} pendulums trained globally`;
   const live: ReactNode[] = [
     `${stats.publications} publications · ${formatInt(stats.citations)} citations`,
     trainLine,
@@ -153,15 +145,6 @@ export default function Hero() {
       </div>
 
       <div className="relative z-10 mx-auto max-w-6xl px-6 pt-28 pb-20 w-full pointer-events-none">
-        <motion.p
-          initial={{ opacity: 0, y: 12 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.05 }}
-          className="inline-flex items-center gap-2 text-xs uppercase tracking-[0.25em] text-accent2"
-        >
-          <span className="inline-block w-2 h-2 rounded-full bg-good animate-pulse" />
-          Available for senior AI/ML roles
-        </motion.p>
 
         <motion.h1
           initial={{ opacity: 0, y: 20 }}
@@ -180,10 +163,7 @@ export default function Hero() {
           transition={{ delay: 0.2, duration: 0.6 }}
           className="mt-5 max-w-xl text-base md:text-lg text-gray-400 leading-relaxed"
         >
-          <span className="text-white">PhD · EPFL.</span> A decade shipping
-          production ML at <span className="text-white">CERN</span>,{" "}
-          <span className="text-white">Eaton</span>, and as a{" "}
-          <span className="text-white">founder</span>.
+          <span className="text-white">PhD (EPFL) · CERN · Eaton · Founder</span>
         </motion.p>
 
         <motion.div

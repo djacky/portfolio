@@ -136,15 +136,11 @@ export default function MPCDemo() {
             The Controller Sees the Future
           </h3>
           <p className="mt-2 text-sm text-gray-400 max-w-2xl leading-relaxed">
-            A grid-tied 3-phase voltage-source converter with an LCL output
-            filter. The MPC discretises the 6-state LCL plant and solves a
-            condensed QP every {Math.round(PARAMS.T_s * 1e6)} µs in your
-            browser, computing two-axis bridge voltages u<sub>d</sub>,
-            u<sub>q</sub> while honouring the SVPWM input bound{" "}
-            (|u| ≤ V<sub>dc</sub>/√3) and hard current rails on every
-            inductor. The three bright arcs fused to the end of each phase
-            trace are the controller&apos;s <em>predicted future</em>{" "}
-            currents, rotated back into abc through inverse Park.
+            A grid connected converter with an LCL filter, steered by a
+            predictive controller that solves a fresh QP every{" "}
+            {Math.round(PARAMS.T_s * 1e6)} µs right in your browser. The
+            bright arcs riding ahead of each phase trace are the
+            controller&apos;s predicted future currents.
           </p>
         </div>
         <SolveBadge

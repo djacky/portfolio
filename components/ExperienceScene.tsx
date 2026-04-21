@@ -23,7 +23,7 @@ type Job = {
   org: string;
   location: string;
   headline: string;
-  summary: string;
+  summary: string[];
   metrics: Metric[];
   tags: string[];
   demo?: { href: string; label: string };
@@ -203,7 +203,7 @@ function CareerOrb({
       meshRef.current.scale.setScalar(cur + (target - cur) * 0.15);
     }
     if (glowRef.current) {
-      const target = isDragging || isHovered ? 1.55 : isDimmed ? 0.5 : 0.95;
+      const target = isDragging || isHovered ? 1.8 : isDimmed ? 0.6 : 1.15;
       const cur = glowRef.current.scale.x;
       const s = cur + (target - cur) * 0.1;
       glowRef.current.scale.set(s, s, 1);
@@ -297,7 +297,7 @@ function CareerOrb({
           map={glowTex}
           color={tint}
           transparent
-          opacity={isDimmed ? 0.08 : 0.28}
+          opacity={isDimmed ? 0.08 : 0.3}
           depthWrite={false}
           blending={THREE.AdditiveBlending}
           toneMapped={false}
@@ -310,6 +310,7 @@ function CareerOrb({
         center
         style={{ pointerEvents: "none", userSelect: "none" }}
         distanceFactor={8}
+        zIndexRange={[5, 0]}
       >
         <div
           style={{
@@ -577,7 +578,7 @@ function DetailPanel({
         onMouseLeave={onLeave}
         style={{
           width: 300,
-          background: "rgba(8, 12, 24, 0.92)",
+          background: "rgba(8, 12, 24, 0.85)",
           backdropFilter: "blur(20px)",
           WebkitBackdropFilter: "blur(20px)",
           border: `1px solid ${job.tint}40`,
@@ -609,16 +610,22 @@ function DetailPanel({
           {job.period} · {job.location}
         </p>
 
-        <p
+        <ul
           style={{
             margin: "10px 0 0",
+            paddingLeft: 16,
             fontSize: 12,
             color: "#d1d5db",
             lineHeight: 1.5,
+            listStyleType: "disc",
           }}
         >
-          {job.summary}
-        </p>
+          {job.summary.map((b, i) => (
+            <li key={i} style={{ marginTop: i === 0 ? 0 : 3 }}>
+              {b}
+            </li>
+          ))}
+        </ul>
 
         <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 10 }}>
           {job.metrics.map((m) => (

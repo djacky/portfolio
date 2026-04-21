@@ -37,7 +37,7 @@ type Job = {
   org: string;
   location: string;
   headline: string;
-  summary: string;
+  summary: string[];
   metrics: Metric[];
   tags: string[];
   demo?: { href: string; label: string };
@@ -48,20 +48,24 @@ const JOBS: Job[] = [
     icon: Rocket,
     tint: "#7c5cff",
     period: "Dec 2023 — Present",
-    role: "Founder & Software Engineer",
+    role: "Founder & Research/AI Engineer",
     org: "Disruptive Labs",
     location: "Geneva, CH",
     headline:
-      "Full-stack multiplayer game with an ML backbone for matchmaking and payouts.",
-    summary:
-      "Own the product end-to-end: distributed AWS backend, PyTorch models, live ops, compliance.",
+      "Full-stack multiplayer platform with an ML backbone for matchmaking/payouts, and distribusted AWS backend.",
+    summary: [
+      "Full-stack multiplayer platform.",
+      "ML backbone for matchmaking and payouts.",
+      "Distributed AWS backend (EC2 server with ALB + SNS/SQS).",
+      "Database management via PostgreSQL.",
+    ],
     metrics: [
       { value: "250k+", label: "daily API req" },
       { value: "1TB+", label: "daily data" },
-      { value: "SOC 2", label: "Type II" },
+      { value: "ML", label: "transformer" },
     ],
-    tags: ["Python", "FastAPI", "PyTorch", "AWS", "PostgreSQL", "Docker"],
-    demo: { href: "#demo-matchmaker", label: "Siamese matchmaker" },
+    tags: ["Python", "FastAPI", "PyTorch", "AWS EC2/Lambda/S3/SNS", "PostgreSQL", "Docker"],
+    demo: { href: "#demo-matchmaker", label: "Transformer matchmaker" },
   },
   {
     icon: Zap,
@@ -72,12 +76,15 @@ const JOBS: Job[] = [
     location: "Lausanne, CH",
     headline:
       "Algorithm layer for Eaton's EV fleet load-balancing platform.",
-    summary:
-      "Trained a PPO policy that observes fleet state and learns an optimal current-allocation schedule, then shipped it to a global fleet of chargers via a FastAPI / AWS Lambda inference layer.",
+    summary: [
+      "Online actor-critic RL network that learns an optimal current-allocation schedule.",
+      "Shipped to a global fleet of chargers via a FastAPI / AWS Lambda inference layer.",
+      "AC/DC regulation and harmonic attenuation using MPC (dq-framework).",
+    ],
     metrics: [
       { value: "weeks → days", label: "validation" },
       { value: "real-time", label: "inference" },
-      { value: "OCPP", label: "protocol" },
+      { value: "MPC", label: "framework" },
     ],
     tags: ["PyTorch", "RL / PPO", "AWS Lambda", "FastAPI", "HIL / SIL"],
     demo: { href: "#demo-ev", label: "Live RL simulation" },
@@ -91,8 +98,11 @@ const JOBS: Job[] = [
     location: "Geneva, CH",
     headline:
       "Data-driven control for the power converters behind the LHC experiments.",
-    summary:
-      "Developed Python APIs for frequency-response identification and H∞ / H2 synthesis. Implemented the resulting controllers on AVR8 microcontrollers in C++. Trained the department on the tooling.",
+    summary: [
+      "Developed Python APIs for frequency-response identification and H∞ / H2 synthesis.",
+      "Implemented the resulting controllers on AVR8 microcontrollers in C++.",
+      "Trained the department on the tooling.",
+    ],
     metrics: [
       { value: "H∞ / H2", label: "synthesis" },
       { value: "AVR8 · C++", label: "real-time" },
@@ -108,8 +118,11 @@ const JOBS: Job[] = [
     org: "Philips Healthcare",
     location: "Highland Heights, USA",
     headline: "Motion control for the next generation of Philips CT scanners.",
-    summary:
-      "Modeled multidomain dynamics in MATLAB / Simulink, developed PLC control in CoDeSys (IEC 61131-3), shipped on production medical hardware.",
+    summary: [
+      "Modeled multidomain dynamics in MATLAB / Simulink.",
+      "Developed PLC control in CoDeSys (IEC 61131-3).",
+      "Shipped on production medical hardware.",
+    ],
     metrics: [
       { value: "CT", label: "hardware" },
       { value: "IEC 61131-3", label: "PLC" },
@@ -124,8 +137,9 @@ const JOBS: Job[] = [
     org: "Apple",
     location: "Cupertino, USA",
     headline: "Transistor-level feasibility studies for mixed-signal systems.",
-    summary:
+    summary: [
       "Simulation and verification toward formal design reviews on unreleased hardware.",
+    ],
     metrics: [{ value: "transistor-level", label: "mixed-signal" }],
     tags: ["Mixed-signal", "Analog"],
   },
@@ -301,9 +315,11 @@ function MobileCard({
             className="overflow-hidden"
           >
             <div className="px-4 pb-4 pt-1">
-              <p className="text-[13px] text-gray-300 leading-relaxed">
-                {job.summary}
-              </p>
+              <ul className="list-disc pl-5 text-[13px] text-gray-300 leading-relaxed space-y-1">
+                {job.summary.map((b, i) => (
+                  <li key={i}>{b}</li>
+                ))}
+              </ul>
 
               <div className="mt-3 flex flex-wrap gap-1.5">
                 {job.metrics.map((m) => (

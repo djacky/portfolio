@@ -267,6 +267,7 @@ function PillarNode({
         center
         style={{ pointerEvents: "none", userSelect: "none" }}
         distanceFactor={8}
+        zIndexRange={[5, 0]}
       >
         <div
           style={{
@@ -524,7 +525,7 @@ function DetailPanel({ pillar }: { pillar: Pillar }) {
       <div
         style={{
           width: 300,
-          background: "rgba(8, 12, 24, 0.92)",
+          background: "rgba(8, 12, 24, 0.85)",
           backdropFilter: "blur(20px)",
           WebkitBackdropFilter: "blur(20px)",
           border: `1px solid ${pillar.color}40`,

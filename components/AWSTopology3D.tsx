@@ -8,9 +8,11 @@
      │   prize pool number floating center  │
      └────────── (vertical wires) ──────────┘
      ┌──── INFRASTRUCTURE (y < -2) ─────────┐
-     │   ec2 → pydantic → postgres          │
-     │     ↑                ↑               │
-     │   s3 ← ─ ─ ─ ─ ─ lambda cluster     │
+     │   [alb]  [gamelift]   (ingress)      │
+     │     ↓                                │
+     │   [ec2] → [sqs] → [postgres]         │
+     │     ↘       ↓        ↑               │
+     │           [lambda] → [s3]            │
      └──────────────────────────────────────┘
 
    Reads a Snapshot per frame (snapshotRef.current) and:
@@ -32,14 +34,18 @@ const INFRA_Y = -3.0;
 const ARENA_RING_R = 5.6;
 
 const ISLAND_POS: Record<IslandId, THREE.Vector3> = {
-  // GameLift sits between S3 and Lambda on the infra plane, pulled a bit
-  // forward so it reads as the session-fleet tier in front of the DB row.
-  gamelift: new THREE.Vector3(-1.5, INFRA_Y,  6.2),
-  ec2:      new THREE.Vector3(-7,   INFRA_Y,  0),
-  pydantic: new THREE.Vector3(-2,   INFRA_Y,  0),
-  postgres: new THREE.Vector3( 4,   INFRA_Y,  0),
-  lambda:   new THREE.Vector3( 4,   INFRA_Y,  4.5),
-  s3:       new THREE.Vector3(-7,   INFRA_Y,  4.5),
+  // Front row (ingress tier) — closest to arena (high z).
+  // ALB centered under the arena so the player→lobby flow reads top-down;
+  // GameLift to the right as a peer front-tier that picks up telemetry.
+  alb:      new THREE.Vector3( 0,   INFRA_Y,  6.5),
+  gamelift: new THREE.Vector3( 6,   INFRA_Y,  6.5),
+  // Core row: EC2 (compute) ← SQS (fan-out) → Postgres (state of record).
+  ec2:      new THREE.Vector3(-6,   INFRA_Y,  2.3),
+  sqs:      new THREE.Vector3( 0,   INFRA_Y,  2.3),
+  postgres: new THREE.Vector3( 6,   INFRA_Y,  2.3),
+  // Back row: Lambda (scoring/payouts) + S3 (replays + ledger).
+  s3:       new THREE.Vector3(-5,   INFRA_Y, -2.5),
+  lambda:   new THREE.Vector3( 4,   INFRA_Y, -2.5),
 };
 
 const MAX_PARTICLES = 140;
@@ -94,11 +100,12 @@ function ParticlePool({ snapshotRef }: { snapshotRef: MutableRefObject<Snapshot 
       const mat = m.material as THREE.MeshBasicMaterial;
       mat.color.set(p.color);
       // batch transfer is the headline particle — it carries the whole
-      // match session. Payout shards next-biggest, then bulk writes.
+      // match session. Payout + refund shards next-biggest, then bulk writes.
       const baseScale =
-        p.kind === "batch"    ? 0.32 :
-        p.kind === "payout"   ? 0.22 :
+        p.kind === "batch"                                     ? 0.32 :
+        p.kind === "payout" || p.kind === "refund"             ? 0.22 :
         p.kind === "snapshot" || p.kind === "ledger" || p.kind === "balance" ? 0.18 :
+        p.kind === "sns" || p.kind === "sqsDeliver"            ? 0.16 :
         0.13;
       m.scale.setScalar(baseScale);
     }
@@ -361,19 +368,71 @@ function Ec2Island({ snapshotRef }: { snapshotRef: MutableRefObject<Snapshot | n
   );
 }
 
-function PydanticIsland({ snapshotRef }: { snapshotRef: MutableRefObject<Snapshot | null> }) {
+function AlbIsland({ snapshotRef }: { snapshotRef: MutableRefObject<Snapshot | null> }) {
+  // Horizontal routing slab with three rails fanning out — the
+  // "load-balanced target groups" visual metaphor.
   return (
-    <IslandBase id="pydantic" snapshotRef={snapshotRef}>
+    <IslandBase id="alb" snapshotRef={snapshotRef}>
       {(matRef) => (
         <>
-          <mesh rotation={[0, Math.PI / 6, 0]}>
-            <cylinderGeometry args={[0.95, 0.95, 0.9, 6]} />
-            <meshStandardMaterial ref={matRef} color="#0a1f12" emissive={ISLAND_META.pydantic.color} emissiveIntensity={0.4} metalness={0.6} roughness={0.4} />
-          </mesh>
-          {/* checkmark glyph (simple V) */}
-          <Text position={[0, 0, 0.55]} fontSize={0.5} color={ISLAND_META.pydantic.color} anchorX="center" anchorY="middle">
-            ✓
+          <RoundedBox args={[1.9, 0.42, 1.3]} radius={0.1} smoothness={3}>
+            <meshStandardMaterial ref={matRef} color="#051821" emissive={ISLAND_META.alb.color} emissiveIntensity={0.4} metalness={0.6} roughness={0.35} />
+          </RoundedBox>
+          {[-0.55, 0, 0.55].map((x) => (
+            <mesh key={x} position={[x, 0.26, 0]}>
+              <boxGeometry args={[0.22, 0.05, 0.9]} />
+              <meshBasicMaterial color={ISLAND_META.alb.color} toneMapped={false} />
+            </mesh>
+          ))}
+          <Text position={[0, 0.02, 0.68]} fontSize={0.32} color={ISLAND_META.alb.color} anchorX="center" anchorY="middle" outlineWidth={0.01} outlineColor="#000">
+            ALB
           </Text>
+        </>
+      )}
+    </IslandBase>
+  );
+}
+
+function SqsIsland({ snapshotRef }: { snapshotRef: MutableRefObject<Snapshot | null> }) {
+  // Horizontal pipe with discrete "message" slots — queue semantics.
+  // Label shows live backlog + DLQ count so it feels instrumented.
+  const bufferRef = useRef<HTMLDivElement>(null);
+  useFrame(() => {
+    const snap = snapshotRef.current;
+    if (!snap || !bufferRef.current) return;
+    const backlog = snap.fleet.sqsBacklog;
+    const dlq = snap.fleet.sqsDlq;
+    bufferRef.current.textContent = `${backlog} queued · ${dlq} DLQ`;
+  });
+  return (
+    <IslandBase id="sqs" snapshotRef={snapshotRef}>
+      {(matRef) => (
+        <>
+          <mesh rotation={[0, 0, Math.PI / 2]}>
+            <cylinderGeometry args={[0.42, 0.42, 1.7, 18]} />
+            <meshStandardMaterial ref={matRef} color="#07201a" emissive={ISLAND_META.sqs.color} emissiveIntensity={0.4} metalness={0.6} roughness={0.35} />
+          </mesh>
+          {[-0.6, -0.25, 0.1, 0.45].map((x) => (
+            <mesh key={x} position={[x, 0, 0]}>
+              <boxGeometry args={[0.16, 0.18, 0.18]} />
+              <meshBasicMaterial color={ISLAND_META.sqs.color} toneMapped={false} />
+            </mesh>
+          ))}
+          <Html center distanceFactor={10} position={[0, -0.55, 0]} style={{ pointerEvents: "none" }}>
+            <div
+              ref={bufferRef}
+              style={{
+                fontFamily: "ui-monospace, Menlo, monospace",
+                fontSize: 9,
+                letterSpacing: 1,
+                color: ISLAND_META.sqs.color,
+                textShadow: `0 0 6px ${ISLAND_META.sqs.color}80`,
+                whiteSpace: "nowrap",
+              }}
+            >
+              0 queued · 0 DLQ
+            </div>
+          </Html>
         </>
       )}
     </IslandBase>
@@ -586,12 +645,19 @@ function S3StackedCubes({ snapshotRef }: { snapshotRef: MutableRefObject<Snapsho
 ============================================================ */
 
 const WIRES: Array<[IslandId, IslandId]> = [
-  ["gamelift", "ec2"],
-  ["gamelift", "s3"],
-  ["ec2", "pydantic"],
-  ["pydantic", "postgres"],
+  // ingress path
+  ["alb", "ec2"],
+  // synchronous state path
+  ["ec2", "postgres"],
+  // async fan-out path
+  ["ec2", "sqs"],
+  ["sqs", "lambda"],
+  // scoring / payout / storage
   ["lambda", "postgres"],
   ["lambda", "s3"],
+  // session fleet
+  ["gamelift", "ec2"],
+  ["gamelift", "s3"],
 ];
 
 function InfraWires() {
@@ -616,15 +682,6 @@ function InfraWires() {
   );
 }
 
-/* arena→ec2 vertical separator (subtle) */
-function LayerSeparator() {
-  return (
-    <mesh position={[0, -1.5, 0]} rotation={[-Math.PI / 2, 0, 0]}>
-      <ringGeometry args={[ARENA_RING_R + 1.4, ARENA_RING_R + 1.5, 64]} />
-      <meshBasicMaterial color="#1f2937" toneMapped={false} transparent opacity={0.25} side={THREE.DoubleSide} />
-    </mesh>
-  );
-}
 
 /* ============================================================
    scene
@@ -646,14 +703,14 @@ function Scene({ snapshotRef }: { snapshotRef: MutableRefObject<Snapshot | null>
       </mesh>
 
       <ArenaFloor />
-      <LayerSeparator />
       <PrizePoolCenter snapshotRef={snapshotRef} />
       <PlayerOrbs snapshotRef={snapshotRef} />
 
       <InfraWires />
       <GameLiftIsland snapshotRef={snapshotRef} />
+      <AlbIsland snapshotRef={snapshotRef} />
       <Ec2Island snapshotRef={snapshotRef} />
-      <PydanticIsland snapshotRef={snapshotRef} />
+      <SqsIsland snapshotRef={snapshotRef} />
       <PostgresIsland snapshotRef={snapshotRef} />
       <LambdaIsland snapshotRef={snapshotRef} />
       <S3Island snapshotRef={snapshotRef} />
@@ -684,7 +741,7 @@ export default function AWSTopology3D({
   return (
     <Canvas
       dpr={[1, 2]}
-      camera={{ position: [-2, 9, 18], fov: 42 }}
+      camera={{ position: [-4, 2, 18], fov: 42 }}
       style={{
         background: "radial-gradient(ellipse at center, #0b0f1a 0%, #05070d 70%)",
       }}

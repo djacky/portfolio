@@ -25,12 +25,13 @@ import { clientIp, looksLikePromptInjection } from "@/lib/request-helpers";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
-const UPSTREAM_TIMEOUT_MS = 25_000;
+const UPSTREAM_TIMEOUT_MS = 55_000;
 
 /* ---------------- config knobs ---------------- */
 
-const MODEL = "claude-sonnet-4-6";
+const MODEL = "claude-haiku-4-5-20251001";
 const MAX_JD_CHARS = 8000;
 const MIN_JD_CHARS = 80;
 const MAX_OUTPUT_TOKENS = 4096;

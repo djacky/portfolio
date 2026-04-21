@@ -9,22 +9,30 @@
    #demo-cern.
 ------------------------------------------------------------------ */
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import dynamic from "next/dynamic";
 import { motion, AnimatePresence } from "framer-motion";
 import { Zap, Users, Atom, Activity, Network, CircuitBoard } from "lucide-react";
 import EVFleetDemo from "./EVFleetDemo";
-import MatchmakerDemo from "./MatchmakerDemo";
 import CERNDemo from "./CERNDemo";
 import MagnetILCDemo from "./MagnetILCDemo";
 
-// AWS + MPC are the heaviest demos — each pulls a 3D scene (transitively
-// three.js / R3F). Defer their bundles until the user actually opens that
-// tab so the initial section paint stays cheap.
+// AWS + MPC + Matchmaker are the heaviest demos — each pulls a 3D scene
+// (transitively three.js / R3F). Defer their bundles until the user actually
+// opens that tab so the initial section paint stays cheap.
 const AWSDemo = dynamic(() => import("./AWSDemo"), { ssr: false });
 const MPCDemo = dynamic(() => import("./MPCDemo"), { ssr: false });
+const MatchmakerDemo = dynamic(() => import("./MatchmakerDemo"), { ssr: false });
 
 type TabKey = "ev" | "matchmaker" | "cern" | "ilc" | "aws" | "mpc";
+
+const VALID_TABS: TabKey[] = ["ev", "matchmaker", "cern", "ilc", "aws", "mpc"];
+
+function readInitialTab(): TabKey {
+  if (typeof window === "undefined") return "ev";
+  const t = new URLSearchParams(window.location.search).get("type");
+  return t && (VALID_TABS as string[]).includes(t) ? (t as TabKey) : "ev";
+}
 
 const TABS: {
   key: TabKey;
@@ -43,47 +51,47 @@ const TABS: {
     icon: Zap,
     tint: "#22d3ee",
     context:
-      "How do you split limited power across dozens of electric vehicles charging at once — without blowing the grid? This demo trains a reinforcement learning agent in your browser to make that decision in real time, the same way the production system does for Eaton's global charger fleet.",
+      "How do you split limited power across dozens of electric vehicles charging at once without blowing the grid? This demo trains a reinforcement learning agent live in your browser to make that call every second, the way the production system does for Eaton's global charger fleet.",
   },
   {
     key: "matchmaker",
     hash: "demo-matchmaker",
-    label: "Siamese Matchmaker",
-    sub: "Disruptive Labs · embedding retrieval",
+    label: "Transformer Matchmaker",
+    sub: "Disruptive Labs · sequence-of-matches model",
     icon: Users,
     tint: "#7c5cff",
     context:
-      "Fair matchmaking means grouping players of similar skill — fast. This demo trains a neural network to map each player into a 2D \"skill fingerprint,\" then clusters similar players into lobbies. Watch the embeddings reorganize in real time as the model learns from match outcomes.",
+      "Today's ranking systems boil a player down to one number. This one reads each player as a sequence of past matches, the way an LLM reads tokens, and infers their skill, playstyle, and whether they're a smurf from the sequence alone.",
   },
   {
     key: "cern",
     hash: "demo-cern",
-    label: "CERN Controller Synthesis",
-    sub: "LHC · H∞ pipeline",
+    label: "Automated Controller Synthesis",
+    sub: "CERN",
     icon: Atom,
     tint: "#34d399",
     context:
-      "The LHC's magnets need controllers tuned to sub-ppm precision — but each power converter behaves slightly differently. This demo recreates the automated pipeline I built at CERN: feed in a frequency response, pick your performance specs, and get back a ready-to-deploy controller.",
+      "The LHC's magnets need controllers tuned to parts per million precision, but each power converter behaves a little differently. This demo recreates the automated pipeline I built at CERN: feed in a frequency response, pick your performance specs, and get back a controller ready to flash onto the hardware.",
   },
   {
     key: "ilc",
     hash: "demo-ilc",
-    label: "Magnet Current Ramp",
-    sub: "CERN · data-driven ILC",
+    label: "Data-Driven Iterative Learning",
+    sub: "CERN",
     icon: Activity,
     tint: "#fbbf24",
     context:
-      "Particle physics experiments need magnet currents that follow precise ramp profiles, but real hardware drifts. This demo shows iterative learning control — the algorithm watches each ramp, learns from the tracking error, and converges on a correction signal that nails the reference.",
+      "Particle physics experiments need magnet currents that follow precise ramp profiles, but real hardware drifts trial after trial. This demo runs iterative learning control: the algorithm watches each ramp, learns from the tracking error, and converges on a correction signal that nails the reference.",
   },
   {
     key: "aws",
     hash: "demo-aws",
     label: "Live Match Backend",
-    sub: "Disruptive Labs · 30-player sim",
+    sub: "Disruptive Labs",
     icon: Network,
     tint: "#fb923c",
     context:
-      "Thirty players, one prize pool, fifteen minutes of real AWS plumbing. Lobby traffic — joins, bets, validation — hits FastAPI on EC2 and lands in Postgres. Once the match starts, player telemetry moves off the API tier entirely: every event buffers on an AWS GameLift session fleet. At match end, GameLift flushes the whole session to EC2 as a single bulk transfer, which validates and persists the dataset, then wakes a cold Lambda to score the field, split the pool, write the ledger to S3, and update every balance. Place a bet, inject a bad payload, or end the match early to drive it yourself.",
+      "Thirty players, one prize pool, and a full slice of the real AWS plumbing I shipped at Disruptive Labs. Place a bet, inject a bad payload, or crash the GameLift fleet and watch the ingress, database, queue, and payout Lambda behave the way they would in production.",
   },
   {
     key: "mpc",
@@ -93,15 +101,28 @@ const TABS: {
     icon: CircuitBoard,
     tint: "#f472b6",
     context:
-      "An inductor-current loop for a grid-tied power converter, tracking a sinusoidal reference against hard current rails. The gold arc is the controller's predicted future — re-solved every millisecond as a convex QP in your browser, condensed-form MPC with Hildreth's dual solver. Watch the arc deflect away from the red rails as the state approaches them; that deflection is the core visual argument for MPC over PI. Drop a load step, push the reference 42% higher, or inject measurement noise — then toggle to the PI baseline and watch it clip through the rail.",
+      "A grid connected power converter tracking a sinusoidal current reference, steered by a convex QP that solves fresh every millisecond right in your browser. The glowing arc ahead of each phase trace is the controller's predicted future; drop a load step or push the reference up and watch it bend away from the red current rails.",
   },
 ];
 
 export default function DemoSwitcher() {
-  const [active, setActive] = useState<TabKey>("ev");
+  const [active, setActive] = useState<TabKey>(readInitialTab);
+
+  // Re-sync from URL on mount — SSR returns "ev" then the client hydrates
+  // with the real query param.
+  useEffect(() => {
+    const t = readInitialTab();
+    if (t !== active) setActive(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const selectTab = (k: TabKey) => {
     setActive(k);
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    params.set("s", "demos");
+    params.set("type", k);
+    history.replaceState(null, "", `?${params.toString()}`);
   };
 
   return (

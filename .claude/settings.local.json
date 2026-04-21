@@ -91,7 +91,11 @@
       "Bash(\"C:\\\\Program Files\\\\nodejs\\\\node.exe\" \"node_modules/typescript/bin/tsc\" --noEmit)",
       "Bash(git rm *)",
       "Bash(\"C:\\\\Program Files\\\\nodejs\\\\node.exe\" \"node_modules/next/dist/bin/next\" lint)",
-      "Bash(cmd //c \"npx tsc --noEmit\")"
+      "Bash(cmd //c \"npx tsc --noEmit\")",
+      "Bash(node_modules/.bin/tsc --noEmit)",
+      "Bash(SEEDS=3 MATCHES=150 npx tsx scripts/matchmaker-harness.ts)",
+      "Bash(tee /tmp/diagnosis.log)",
+      "Bash(xargs cat *)"
     ]
   }
 }

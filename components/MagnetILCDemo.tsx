@@ -494,11 +494,11 @@ export default function MagnetILCDemo() {
             Magnet Current Ramp — Iterative Learning Control
           </h3>
           <p className="mt-2 text-sm text-gray-400 max-w-2xl leading-relaxed">
-            A simulated accelerator magnet executes the same current
-            profile every trial. Between trials a convex QP (solved
-            in-browser via FISTA) synthesises the next feedforward input
-            from the previous error. No plant model is assumed — the QP
-            uses only a single identification impulse response.
+            The same magnet runs the same current ramp trial after trial,
+            and between runs a convex QP watches the tracking error and
+            nudges the next input until it vanishes. No plant model is
+            needed, just a single identification impulse from the real
+            hardware.
           </p>
           <a
             href="https://cds.cern.ch/record/2799372"

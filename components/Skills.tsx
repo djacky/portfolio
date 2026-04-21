@@ -36,8 +36,8 @@ const GROUPS: Group[] = [
     skills: [
       { name: "PyTorch", level: 0.95 },
       { name: "Deep Learning", level: 0.92 },
-      { name: "Reinforcement Learning", level: 0.88 },
-      { name: "Optimization", level: 0.9 },
+      { name: "Reinforcement Learning", level: 0.9 },
+      { name: "Convex Optimization", level: 0.95 },
       { name: "Model serving", level: 0.85 },
     ],
   },
@@ -49,8 +49,8 @@ const GROUPS: Group[] = [
     skills: [
       { name: "Python", level: 0.98 },
       { name: "C++", level: 0.85 },
-      { name: "TypeScript", level: 0.8 },
-      { name: "MATLAB", level: 0.85 },
+      { name: "Node.js", level: 0.85 },
+      { name: "MATLAB", level: 0.9 },
       { name: "Solidity", level: 0.6 },
     ],
   },
@@ -60,10 +60,10 @@ const GROUPS: Group[] = [
     tint: "#34d399",
     tagline: "distributed systems that don't wake you up at 3am",
     skills: [
-      { name: "FastAPI", level: 0.95 },
-      { name: "AWS", level: 0.92 },
+      { name: "FastAPI · Pydantic", level: 0.95 },
+      { name: "AWS · EC2/Lambda/S3/SNS", level: 0.92 },
       { name: "PostgreSQL", level: 0.85 },
-      { name: "Auth · OAuth2", level: 0.82 },
+      { name: "Auth · OAuth2", level: 0.88 },
       { name: "Docker · CI/CD", level: 0.88 },
     ],
   },
@@ -78,6 +78,8 @@ const GROUPS: Group[] = [
       { name: "HIL / SIL", level: 0.85 },
       { name: "Embedded C++", level: 0.8 },
       { name: "Signal processing", level: 0.85 },
+      { name: "MPC", level: 0.85 },
+      { name: "H\u221E control", level: 0.85 },
     ],
   },
 ];
@@ -86,10 +88,7 @@ const TOOLS = [
   "Git",
   "Linux",
   "pytest",
-  "Grafana",
   "Redis",
-  "Kubernetes",
-  "Terraform",
   "Celery",
 ];
 

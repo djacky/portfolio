@@ -81,9 +81,9 @@ const EMPTY_HUD: HudState = {
   matchClockTotalMs: 1,
   prizePool: 0,
   leaderboard: [],
-  health: { ec2: true, pydantic: true, postgres: true, s3: true, lambda: false, gamelift: true },
-  islandActive: { ec2: false, pydantic: false, postgres: false, lambda: false, s3: false, gamelift: false },
-  islandHeat:   { ec2: 0,   pydantic: 0,   postgres: 0,   lambda: 0,   s3: 0,   gamelift: 0   },
+  health: { alb: true, ec2: true, postgres: true, sqs: true, s3: true, lambda: false, gamelift: true },
+  islandActive: { alb: false, ec2: false, postgres: false, sqs: false, lambda: false, s3: false, gamelift: false },
+  islandHeat:   { alb: 0,     ec2: 0,     postgres: 0,     sqs: 0,     lambda: 0,     s3: 0,     gamelift: 0     },
   log: [],
   rps: 0,
   rpsHistory: [],
@@ -213,20 +213,20 @@ export default function AWSDemo() {
 
 function Header() {
   return (
-    <div className="flex flex-wrap items-start justify-between gap-4">
+    <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4 mb-5">
       <div>
-        <div className="inline-flex items-center gap-2 text-xs uppercase tracking-[0.2em] text-[#fb923c]">
-          <Network className="w-3 h-3" /> Disruptive Labs · live match backend
+        <div className="flex items-center gap-2 text-[11px] font-mono uppercase tracking-[0.22em] text-[#fb923c]">
+          <Network className="w-3.5 h-3.5" />
+          Disruptive Labs · live match backend
         </div>
-        <h3 className="mt-2 text-2xl font-semibold text-white">
+        <h3 className="mt-2 text-2xl md:text-3xl font-semibold text-gradient">
           30 Players · One Pool · GameLift Fleet → EC2 → Prize Pipeline
         </h3>
-        <p className="mt-2 text-sm text-gray-400 max-w-2xl">
-          A compressed run of the gaming platform I built. Lobby traffic lands on FastAPI/Pydantic
-          on EC2 with RDS Postgres. During the match, session telemetry buffers on a managed{" "}
-          <span className="text-[#f472b6]">AWS GameLift</span> fleet — the API tier stays cold.
-          On match end, GameLift flushes the full session as one bulk transfer to EC2, which
-          validates, persists, and hands off to a Lambda that scores the field and pays out.
+        <p className="mt-2 text-sm text-gray-400 max-w-2xl leading-relaxed">
+          A compressed run of the real gaming platform I shipped at Disruptive Labs. Thirty
+          players land on the API, a managed{" "}
+          <span className="text-[#f472b6]">AWS GameLift</span> fleet buffers the live session,
+          and once the match ends EC2 and a Lambda fan the payouts out through RDS, SQS, and S3.
         </p>
       </div>
     </div>
@@ -278,7 +278,7 @@ function PhaseStrip({ phase, phaseProgress }: { phase: Phase; phaseProgress: num
 ==================================================================== */
 
 const ICONS_FOR: Record<IslandId, string> = {
-  gamelift: "GL", ec2: "EC2", pydantic: "PYD", postgres: "RDS", lambda: "λ", s3: "S3",
+  gamelift: "GL", alb: "ALB", ec2: "EC2", sqs: "SQS", postgres: "RDS", lambda: "λ", s3: "S3",
 };
 
 function InfraHealthOverlay({
@@ -669,14 +669,14 @@ function ControlBar({
             onClick={onGameLiftDrop}
             tone="danger"
             disabled={!inMatch}
-            tooltip="Kill a GameLift fleet instance mid-match. Session migrates to a sibling via S3 replay restore — no data loss."
+            tooltip="Kill a GameLift fleet instance mid-match. Without the full session buffer we can't score fairly — match is VOIDED and all 30 stakes are refunded idempotently via SNS → SQS → Lambda."
           />
           <ChaosBtn
             label="EC2 pod fail"
             icon={<Server className="w-3 h-3" />}
             onClick={onEc2Fail}
             tone="danger"
-            tooltip="Fail an EC2 health check. ALB drains it, ASG spawns a replacement, DesiredCapacity holds."
+            tooltip="Kill an EC2 pod. If a bet was in-flight, watch the 502 bounce back to the player, then ALB retry on a healthy sibling with the same Idempotency-Key — commits exactly once. ASG spawns the replacement in parallel."
           />
           <ChaosBtn
             label="Lambda timeout"
@@ -745,7 +745,7 @@ function Legend() {
   return (
     <div className="mt-3 flex flex-wrap items-center gap-2 text-[10px] font-mono">
       <span className="text-gray-500 mr-1 uppercase tracking-wider">stack:</span>
-      {(["gamelift", "ec2", "pydantic", "postgres", "lambda", "s3"] as IslandId[]).map((id) => (
+      {(["gamelift", "alb", "ec2", "sqs", "postgres", "lambda", "s3"] as IslandId[]).map((id) => (
         <span
           key={id}
           className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-white/5 border border-white/5"

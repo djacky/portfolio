@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import dynamic from "next/dynamic";
 import {
@@ -12,7 +12,13 @@ import {
   CheckCircle2,
   Database,
   Waves,
+  Sigma,
 } from "lucide-react";
+import katex from "katex";
+
+const ACCENT_GREEN = "#34d399";
+const ACCENT_CYAN = "#22d3ee";
+const ACCENT_GOLD = "#fbbf24";
 
 const CERNPipeline3D = dynamic(() => import("./CERNPipeline3D"), {
   ssr: false,
@@ -508,25 +514,21 @@ export default function CERNDemo() {
     <div className="shimmer-border rounded-3xl">
       <div className="glass rounded-3xl p-6 md:p-8">
         {/* header */}
-        <div className="flex flex-wrap items-start justify-between gap-4">
+        <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4 mb-5">
           <div>
-            <div className="inline-flex items-center gap-2 text-xs uppercase tracking-[0.2em] text-accent2">
-              <Atom className="w-3 h-3" /> CERN · Controller Synthesis
+            <div className="flex items-center gap-2 text-[11px] font-mono uppercase tracking-[0.22em] text-accent2">
+              <Atom className="w-3.5 h-3.5" />
+              CERN · Controller Synthesis
             </div>
-            <h3 className="mt-2 text-2xl font-semibold text-white flex items-center gap-2 flex-wrap">
+            <h3 className="mt-2 text-2xl md:text-3xl font-semibold text-gradient">
               Power converter controller synthesis
-              <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider text-accent2 border border-accent2/30 rounded-full px-2 py-0.5">
-                <Activity className="w-3 h-3" /> convex optimization · commissioning automation
-              </span>
             </h3>
-            <p className="mt-2 text-sm text-gray-400 max-w-2xl">
-              A Python API I built at CERN turned a manual, expert-driven
-              commissioning step into a one-click workflow. Engineers uploaded
-              a measured frequency response, picked their desired closed-loop
-              specs, and the service ran ARX fitting followed by H∞ controller
-              synthesis (CVXPY + MOSEK) to spit back an RST polynomial ready
-              to flash onto the converter. Scroll through the three scenes
-              below — GUI → backend pipeline → results — to see the full loop.
+            <p className="mt-2 text-sm text-gray-400 max-w-2xl leading-relaxed">
+              The LHC&apos;s magnets need controllers tuned to parts per million
+              precision, but each power converter behaves a little differently.
+              This demo recreates the automated pipeline I built at CERN: feed
+              in a frequency response, pick your performance specs, and get
+              back a controller ready to flash onto the hardware.
             </p>
           </div>
           <div className="text-[10px] font-mono text-gray-500 uppercase tracking-wider">
@@ -535,7 +537,7 @@ export default function CERNDemo() {
         </div>
 
         {/* scene container */}
-        <div className="mt-6 relative min-h-[560px]">
+        <div className="mt-6 relative">
           <AnimatePresence mode="wait">
             {scene === "gui" && (
               <SceneGUI
@@ -582,6 +584,209 @@ export default function CERNDemo() {
             )}
           </AnimatePresence>
         </div>
+
+        <HInfFormulation specs={specs} />
+      </div>
+    </div>
+  );
+}
+
+/* ==========================================================
+   KaTeX helper + H∞ optimization formulation
+   ========================================================== */
+
+function Tex({
+  expr,
+  block = false,
+  className = "",
+}: {
+  expr: string;
+  block?: boolean;
+  className?: string;
+}) {
+  const html = useMemo(
+    () =>
+      katex.renderToString(expr, {
+        throwOnError: false,
+        displayMode: block,
+        output: "html",
+        strict: "ignore",
+      }),
+    [expr, block],
+  );
+  const Tag = block ? "div" : "span";
+  return (
+    <Tag
+      className={className}
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
+  );
+}
+
+function FormSection({
+  title,
+  dynamicTitle,
+  children,
+}: {
+  title: string;
+  dynamicTitle?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="rounded-xl border border-white/5 bg-black/20 p-4">
+      <div
+        className="text-[10.5px] font-mono uppercase tracking-[0.18em] mb-3"
+        style={{ color: ACCENT_GOLD }}
+      >
+        {dynamicTitle ?? title}
+      </div>
+      <div className="flex flex-col">{children}</div>
+    </div>
+  );
+}
+
+function HInfFormulation({ specs }: { specs: Specs }) {
+  const plantExpr = String.raw`G(e^{-j\omega T_s}) \;=\; \text{measured frequency response}`;
+  const desiredExpr = String.raw`\mathcal{S}_{ry}^{\,d}(s) \;=\; \frac{\omega_d^{2}}{s^{2} + 2\zeta\,\omega_d\,s + \omega_d^{2}}\,e^{-s\,d_r}, \quad W \;=\; \bigl(1 - \mathcal{S}_{ry}^{\,d}\bigr)^{-1}`;
+  const rstExpr = String.raw`\begin{aligned} R(z^{-1},\rho) &= r_0 + r_1 z^{-1} + \cdots + r_{n_r} z^{-n_r} \\ S(z^{-1},\rho) &= 1 + s_1 z^{-1} + \cdots + s_{n_s} z^{-n_s} \\ T(z^{-1},\rho) &= t_0 + t_1 z^{-1} + \cdots + t_{n_t} z^{-n_t} \end{aligned}`;
+  const decisionExpr = String.raw`\rho^{\!\top} \;=\; \bigl[\,r_0,\ldots,r_{n_r},\; s_1,\ldots,s_{n_s},\; t_0,\ldots,t_{n_t}\,\bigr] \in \mathbb{R}^{n_{rst}}`;
+  const psiExpr = String.raw`\psi(\rho) \;=\; G\,R(\rho) + S(\rho), \qquad \mathcal{S}_{ry}(\rho) \;=\; \dfrac{G_f\,T(\rho)}{\psi(\rho)}`;
+
+  const hinfObjExpr = String.raw`\min_{\rho}\;\bigl\lVert\, W\bigl(\,1 - \mathcal{S}_{ry}(\rho)\,\bigr)\bigr\rVert_{\infty}`;
+  const epigraphExpr = String.raw`\min_{\rho,\,\gamma}\;\gamma \quad \text{s.t.}\quad \bigl[W\bigl(1-\mathcal{S}_{ry}(\rho)\bigr)\bigr]^{\!\star}\bigl[W\bigl(1-\mathcal{S}_{ry}(\rho)\bigr)\bigr] \;<\; \gamma`;
+  const convexExpr = String.raw`\gamma^{-1}\,\bigl\lvert\,W\bigl(\psi(\rho) - G_f\,T(\rho)\bigr)\bigr\rvert^{2} \;<\; 2\,\Re\bigl\{\psi(\rho)\,\psi^{\star}(\rho_0)\bigr\} - \bigl\lvert\psi(\rho_0)\bigr\rvert^{2}`;
+
+  const mmExpr = String.raw`\bigl\lvert\,\Delta M_{ib}\,S(\rho)\bigr\rvert^{2} \;<\; 2\,\Re\bigl\{\psi(\rho)\,\psi^{\star}(\rho_0)\bigr\} - \bigl\lvert\psi(\rho_0)\bigr\rvert^{2}`;
+  const noiseExpr = String.raw`\bigl\lvert\,A_k^{-1}\,G_f^{\,k}\,S^{\,k}(\rho)\bigr\rvert^{2} \;<\; 2\,\Re\bigl\{\psi^{k}(\rho)\,\psi^{\star,k}(\rho_0)\bigr\} - \bigl\lvert\psi^{k}(\rho_0)\bigr\rvert^{2}`;
+  const ctrlStabExpr = String.raw`\Re\{\,S(\rho)\,\} \;>\; 0 \qquad \forall\,\omega\in\Omega := \bigl[\,0,\,\pi/T_s\,\bigr]`;
+
+  const Ts_us = (specs.ts * 1e6).toFixed(0);
+
+  return (
+    <div className="mt-6 rounded-2xl border border-white/10 bg-black/30 p-5 md:p-6">
+      <div className="flex items-center gap-2 mb-1">
+        <Sigma className="w-4 h-4" style={{ color: ACCENT_GREEN }} />
+        <div
+          className="text-[11px] font-mono uppercase tracking-[0.22em]"
+          style={{ color: ACCENT_GREEN }}
+        >
+          Optimization problem · H∞ controller synthesis
+        </div>
+      </div>
+      <div className="text-[11px] text-gray-500 leading-relaxed max-w-3xl mb-4">
+        PyFresco minimises the <Tex expr={String.raw`\mathcal{H}_\infty`} /> norm
+        of the model-matching error between the desired sensitivity{" "}
+        <Tex expr={String.raw`\mathcal{S}_{ry}^{\,d}`} /> and the one produced
+        by the RST controller. The raw constraint is convex–concave; linearising{" "}
+        <Tex expr={String.raw`\psi^{\star}(\rho)\,\psi(\rho)`} /> around a
+        stabilising iterate <Tex expr={String.raw`\rho_0`} /> turns each inner
+        problem into a convex SDP solved per-frequency by CVXPY + MOSEK. A
+        bisection over <Tex expr={String.raw`\gamma`} /> and an outer
+        sequential-convex step converge to a local optimum.
+      </div>
+
+      <div className="grid gap-4 md:grid-cols-2">
+        {/* ---- Plant + controller ---- */}
+        <FormSection title="Plant · identified FRF + RST structure">
+          <div className="text-[10px] font-mono uppercase tracking-wider text-gray-500 mb-1">Frequency response</div>
+          <Tex expr={plantExpr} block className="text-gray-200 text-[11.5px] overflow-x-auto" />
+
+          <div className="text-[10px] font-mono uppercase tracking-wider text-gray-500 mt-3 mb-1">Desired closed-loop</div>
+          <Tex expr={desiredExpr} block className="text-gray-200 text-[12px] overflow-x-auto" />
+
+          <div className="text-[10px] font-mono uppercase tracking-wider text-gray-500 mt-3 mb-1">
+            RST controller · orders <Tex expr={String.raw`(n_r, n_s, n_t)`} />
+          </div>
+          <Tex expr={rstExpr} block className="text-gray-200 text-[12px] overflow-x-auto" />
+
+          <div className="text-[10px] font-mono uppercase tracking-wider text-gray-500 mt-3 mb-1">Decision variable</div>
+          <Tex expr={decisionExpr} block className="text-gray-200 text-[12px] overflow-x-auto" />
+
+          <div className="text-[10px] font-mono uppercase tracking-wider text-gray-500 mt-3 mb-1">Closed-loop sensitivity</div>
+          <Tex expr={psiExpr} block className="text-gray-200 text-[12px] overflow-x-auto" />
+        </FormSection>
+
+        {/* ---- Objective · epigraph · convexified · hard constraints ---- */}
+        <FormSection title="Objective · H∞ model matching">
+          <div className="text-[10px] font-mono uppercase tracking-wider text-gray-500 mb-1">Original criterion</div>
+          <Tex expr={hinfObjExpr} block className="text-gray-200 text-[13px] overflow-x-auto" />
+
+          <div className="text-[10px] font-mono uppercase tracking-wider text-gray-500 mt-3 mb-1">Epigraph form</div>
+          <Tex expr={epigraphExpr} block className="text-gray-200 text-[12px] overflow-x-auto" />
+
+          <div className="text-[10px] font-mono uppercase tracking-wider text-gray-500 mt-3 mb-1">
+            Convexified · linearised about <Tex expr={String.raw`\rho_0`} />
+          </div>
+          <Tex expr={convexExpr} block className="text-gray-200 text-[11.5px] overflow-x-auto" />
+
+          <div
+            className="text-[10px] font-mono uppercase tracking-[0.18em] mt-4 mb-2"
+            style={{ color: ACCENT_GREEN }}
+          >
+            Subject to · ∀ ω ∈ Ω, k = 1…a
+          </div>
+
+          <div className="text-[10px] font-mono uppercase tracking-wider text-gray-500 mb-1">
+            Modulus margin <Tex expr={String.raw`\Delta M_{ib}`} />
+          </div>
+          <Tex expr={mmExpr} block className="text-gray-200 text-[11px] overflow-x-auto" />
+
+          <div className="text-[10px] font-mono uppercase tracking-wider text-gray-500 mt-3 mb-1">
+            Noise attenuation at <Tex expr={String.raw`\omega_k`} />
+          </div>
+          <Tex expr={noiseExpr} block className="text-gray-200 text-[11px] overflow-x-auto" />
+
+          <div className="text-[10px] font-mono uppercase tracking-wider text-gray-500 mt-3 mb-1">Open-loop controller stability</div>
+          <Tex expr={ctrlStabExpr} block className="text-gray-200 text-[12px] overflow-x-auto" />
+        </FormSection>
+      </div>
+
+      <div className="mt-5 rounded-xl border border-white/5 bg-black/20 p-4">
+        <div
+          className="text-[10.5px] font-mono uppercase tracking-[0.18em] mb-2"
+          style={{ color: ACCENT_GOLD }}
+        >
+          What each constraint buys you
+        </div>
+        <ul className="text-[11px] text-gray-400 leading-relaxed space-y-1.5">
+          <li>
+            <span className="text-gray-200">Modulus margin</span> —
+            keeps <Tex expr={String.raw`|\mathcal{S}_{d_y y}|`} /> below{" "}
+            <Tex expr={String.raw`1/\Delta M_{ib}`} />, guaranteeing a minimum
+            distance from the Nyquist locus to the −1 point. Robustness to
+            plant mismatch.
+          </li>
+          <li>
+            <span className="text-gray-200">Noise attenuation at</span>{" "}
+            <Tex expr={String.raw`\omega_k`} /> — bounds the sensitivity from
+            voltage-loop disturbance to output at each measured frequency by{" "}
+            <Tex expr={String.raw`A_k`} />. Prevents amplification of
+            known-noisy bands (e.g. rectifier ripple).
+          </li>
+          <li>
+            <span className="text-gray-200">Open-loop controller stability</span>{" "}
+            — sufficient condition for the zeros of{" "}
+            <Tex expr={String.raw`S(z^{-1})`} /> to lie inside the unit
+            circle, so the implemented controller is itself stable (matters
+            for anti-windup back-calculation).
+          </li>
+        </ul>
+      </div>
+
+      <div className="mt-4 text-[10px] font-mono text-gray-500 leading-relaxed">
+        <span style={{ color: ACCENT_CYAN }}>W</span> shapes the error toward
+        the user-chosen bandwidth <Tex expr={String.raw`f_c`} /> and damping{" "}
+        <Tex expr={String.raw`\zeta`} />;{" "}
+        <span style={{ color: ACCENT_GREEN }}>γ</span> is driven down by
+        bisection. Constraints are evaluated on the measured FRF grid —{" "}
+        <Tex expr={String.raw`k = 1,\ldots,a`} /> indexes the frequency
+        samples. Controller sample time <Tex expr={String.raw`T_s`} /> ={" "}
+        {Ts_us} µs. Outer loop: bisect{" "}
+        <Tex expr={String.raw`\gamma`} /> → solve the inner convex SDP → set{" "}
+        <Tex expr={String.raw`\psi(\rho_0) \leftarrow \psi(\rho^{\star})`} />{" "}
+        → repeat until{" "}
+        <Tex expr={String.raw`|\gamma_{i+1} - \gamma_i|`} /> drops below
+        tolerance. Output: the RST polynomials shown above.
       </div>
     </div>
   );

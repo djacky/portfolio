@@ -917,22 +917,19 @@ export default function EVFleetDemo() {
     <div className="shimmer-border rounded-3xl">
       <div className="glass rounded-3xl p-6 md:p-8">
         {/* header */}
-        <div className="flex flex-wrap items-start justify-between gap-4">
+        <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4 mb-5">
           <div>
-            <div className="inline-flex items-center gap-2 text-xs uppercase tracking-[0.2em] text-accent2">
-              <Zap className="w-3 h-3" /> Eaton · EV fleet load balancing
+            <div className="flex items-center gap-2 text-[11px] font-mono uppercase tracking-[0.22em] text-accent2">
+              <Zap className="w-3.5 h-3.5" />
+              Eaton · EV fleet load balancing
             </div>
-            <h3 className="mt-2 text-2xl font-semibold text-white flex items-center gap-2">
+            <h3 className="mt-2 text-2xl md:text-3xl font-semibold text-gradient">
               Reinforcement-learning current allocator
-              <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider text-accent2 border border-accent2/30 rounded-full px-2 py-0.5">
-                <Brain className="w-3 h-3" /> neural policy · live training
-              </span>
             </h3>
-            <p className="mt-2 text-sm text-gray-400 max-w-2xl">
-              A real 2-layer MLP policy + value head is training in your browser
-              right now. Actor-critic / REINFORCE updates run every simulation
-              step against the shaped reward from the Eaton spec. Watch the mean
-              reward climb as it learns to balance priority, urgency, fairness,
+            <p className="mt-2 text-sm text-gray-400 max-w-2xl leading-relaxed">
+              A small policy network is training live in your browser to split
+              current across the fleet against the Eaton spec. Watch the mean
+              reward climb as it learns to juggle priority, urgency, fairness,
               and the grid cap.
             </p>
           </div>
