@@ -4,8 +4,6 @@ import { motion, AnimatePresence } from "framer-motion";
 import dynamic from "next/dynamic";
 import {
   Atom,
-  Upload,
-  Activity,
   ChevronDown,
   Play,
   RotateCcw,
@@ -13,8 +11,22 @@ import {
   Database,
   Waves,
   Sigma,
+  AlertTriangle,
 } from "lucide-react";
 import katex from "katex";
+import { PLANTS, plantById, Plant, TS_FIXED } from "@/lib/hinf-plants";
+import {
+  bandwidthBoundsHz,
+  cAbs,
+  logFreqGrid,
+  SynthesisResult,
+  SynthesisSpecs,
+} from "@/lib/hinf-synthesis";
+import {
+  synthesizeInWorker,
+  disposeHinfWorker,
+  ProgressEvent,
+} from "@/lib/hinf-worker-client";
 
 const ACCENT_GREEN = "#34d399";
 const ACCENT_CYAN = "#22d3ee";
@@ -32,105 +44,149 @@ const CERNPipeline3D = dynamic(() => import("./CERNPipeline3D"), {
 /* ------------------------------------------------------------------
    CERN — Power Converter Controller Synthesis demo.
    Three-scene flow:
-     1. GUI  — specs + frequency response upload
+     1. GUI  — plant selector + H∞ spec sliders
      2. 3D   — backend pipeline visualization (Three.js via R3F)
+                 · live γ / bandwidth streamed from the Web Worker
      3. GUI  — synthesized RST polynomials + closed-loop Bode
+   The synthesis itself runs in a Web Worker (lib/hinf-worker.ts)
+   which drives an SCS-WASM SOCP solve at each γ of a bisection.
 ------------------------------------------------------------------ */
 
 type Scene = "gui" | "pipeline" | "results";
-type Specs = { bw: number; pm: number; gm: number; ts: number };
+type Specs = SynthesisSpecs;
 
-interface Results {
-  R: number[];
-  S: number[];
-  T: number[];
-  achievedBw: number;
-  achievedPm: number;
-}
+/* ---------------- Bode plot (scene 1: |G|, scene 3: |T_cl|) ---------------- */
 
-/* Synthesis stub — coefficients are loosely scaled by the user's specs but
- * also randomized within realistic bounds so each run produces a different
- * RST. S(z⁻¹) is monic (S[0] = 1) by convention. */
-function synthesize(specs: Specs): Results {
-  const wn = 2 * Math.PI * specs.bw;
-  const zeta = Math.sin((specs.pm * Math.PI) / 180) / 2 + 0.35;
-  const dt = specs.ts;
-  // discrete pole magnitude / cosine — used to anchor S(z⁻¹) realistically
-  const a = Math.exp(-zeta * wn * dt);
-  const b = a * Math.cos(wn * dt * Math.sqrt(Math.max(0, 1 - zeta * zeta)));
-  const jitter = (amp: number) => (Math.random() - 0.5) * 2 * amp;
-
-  // R(z⁻¹) — small feedback numerator coefficients, sensitive to bandwidth
-  const r0 = +(0.012 + specs.bw / 6000 + jitter(0.006)).toFixed(3);
-  const r1 = +(-0.004 - specs.gm / 4000 + jitter(0.005)).toFixed(3);
-  const r2 = +(0.002 + jitter(0.003)).toFixed(3);
-
-  // S(z⁻¹) — monic denominator; underdamped 2nd-order pole pair shape
-  const s1 = +(-2 * b + jitter(0.08)).toFixed(3);
-  const s2 = +(a * a + jitter(0.05)).toFixed(3);
-
-  // T(z⁻¹) — feedforward, roughly the steady-state gain
-  const t0 = +(0.018 + specs.bw / 7000 + jitter(0.004)).toFixed(3);
-  const t1 = +(0.004 + jitter(0.003)).toFixed(3);
-
-  return {
-    R: [r0, r1, r2],
-    S: [1, s1, s2],          // S[0] always 1.0
-    T: [t0, t1],
-    achievedBw: specs.bw + Math.round((Math.random() - 0.5) * 6),
-    achievedPm: +(specs.pm + (Math.random() - 0.5) * 3).toFixed(1),
-  };
-}
-
-/* ---------------- open-loop Bode plot (scene 1) ---------------- */
-
-function BodePlot({ closedLoop, achievedBw }: { closedLoop?: boolean; achievedBw?: number }) {
+function BodePlot({
+  plant,
+  specs,
+  closedLoop,
+  achievedBw,
+  results,
+  height,
+}: {
+  plant: Plant;
+  specs: Specs;
+  closedLoop?: boolean;
+  achievedBw?: number;
+  results?: SynthesisResult;
+  height?: number;
+}) {
   const W = 360;
-  const H = 130;
+  const H = height ?? 130;
   const pad = 28;
-  // 2nd-order plant: G(s) = wn^2 / (s^2 + 2ζwn s + wn^2)
-  const wn = closedLoop ? (achievedBw ?? 120) * 2 * Math.PI : 220;
-  const zeta = closedLoop ? 0.7 : 0.12;
-  const fmin = 1, fmax = 2000;
-  const N = 120;
-  const points = Array.from({ length: N }, (_, i) => {
-    const f = fmin * Math.pow(fmax / fmin, i / (N - 1));
-    const w = 2 * Math.PI * f;
-    const re = wn * wn - w * w;
-    const im = 2 * zeta * wn * w;
-    const mag = (wn * wn) / Math.sqrt(re * re + im * im);
-    const dB = 20 * Math.log10(mag);
-    return { f, dB };
-  });
-  // Measured curve = ideal + small per-frequency measurement noise.
-  // Per-frequency uncertainty σ(f) — larger at high frequency where the
-  // converter response is harder to identify. Cap at ~3 dB.
-  const measured = points.map((p) => {
-    const sigma = 0.4 + 0.0018 * p.f;
-    const noise = (Math.random() - 0.5) * 1.0 * sigma;
-    return { f: p.f, dB: p.dB + noise, sigma: Math.min(3.0, sigma) };
-  });
 
-  const dBmin = -40, dBmax = 10;
+  const { fNyq, points } = useMemo(() => {
+    // Ts comes from specs (user-sliderable) — not plant.Ts, so the
+    // Nyquist cut-off moves when the user changes the sampling period.
+    const Ts = specs.Ts;
+    const nyq = 1 / (2 * Ts);
+
+    // Closed-loop uses the same linear synthesis grid the SOCP solved
+    // on; open-loop uses a log-spaced grid for a clean display shape.
+    if (closedLoop && results) {
+      const grid = plant.buildGrid(Ts, specs.desBw);
+      const Rc = results.RFull;
+      const Sc = results.SFull;
+      const Tc = results.TFull;
+      const pts: { f: number; dB: number }[] = [];
+      for (let k = 0; k < grid.w.length; k++) {
+        const wk = grid.w[k];
+        let Rre = 0, Rim = 0, Sre = 0, Sim = 0, Tre = 0, Tim = 0;
+        for (let i = 0; i < Rc.length; i++) {
+          const ang = -wk * Ts * i;
+          Rre += Rc[i] * Math.cos(ang);
+          Rim += Rc[i] * Math.sin(ang);
+        }
+        for (let i = 0; i < Sc.length; i++) {
+          const ang = -wk * Ts * i;
+          Sre += Sc[i] * Math.cos(ang);
+          Sim += Sc[i] * Math.sin(ang);
+        }
+        for (let i = 0; i < Tc.length; i++) {
+          const ang = -wk * Ts * i;
+          Tre += Tc[i] * Math.cos(ang);
+          Tim += Tc[i] * Math.sin(ang);
+        }
+        const Gk = grid.G[k];
+        const MAk = grid.MA[k];
+        const GTre = Gk.re * Tre - Gk.im * Tim;
+        const GTim = Gk.re * Tim + Gk.im * Tre;
+        const GMARe_r = Gk.re * MAk.re - Gk.im * MAk.im;
+        const GMAIm_r = Gk.re * MAk.im + Gk.im * MAk.re;
+        const GMAR_re = GMARe_r * Rre - GMAIm_r * Rim;
+        const GMAR_im = GMARe_r * Rim + GMAIm_r * Rre;
+        const Dre = GMAR_re + Sre;
+        const Dim = GMAR_im + Sim;
+        const dmag2 = Dre * Dre + Dim * Dim;
+        const num = Math.hypot(GTre, GTim);
+        const mag = dmag2 > 0 ? num / Math.sqrt(dmag2) : 0;
+        pts.push({ f: wk / (2 * Math.PI), dB: 20 * Math.log10(Math.max(mag, 1e-20)) });
+      }
+      return { fNyq: nyq, points: pts };
+    }
+
+    // Open-loop: evaluate |G(jω)| on 200 log-spaced points.
+    const wInit = plant.dominantPoleRad / 100;
+    const wLog = logFreqGrid(wInit, Ts, 200);
+    const pts = wLog.map((w) => ({
+      f: w / (2 * Math.PI),
+      dB: 20 * Math.log10(Math.max(cAbs(plant.frf(w)), 1e-20)),
+    }));
+    return { fNyq: nyq, points: pts };
+  }, [plant, specs.Ts, closedLoop, results]);
+
+  // Log x-axis: closed-loop centres the achieved f_c on the plot —
+  // fMin = f_c² / fNyq makes log10(f_c) the midpoint of [log10(fMin),
+  // log10(fNyq)].  Open-loop keeps its natural grid start.
+  const fMin =
+    closedLoop && achievedBw && achievedBw > 0 && achievedBw < fNyq
+      ? Math.max((achievedBw * achievedBw) / fNyq, 1e-6)
+      : (points[0]?.f ?? fNyq / 1000);
+  // Clip points to the displayed x-range so the path doesn't leak
+  // out the left edge of the plot box.
+  const visible = points.filter((p) => p.f >= fMin && p.f <= fNyq);
+
+  // Auto-scale the y-axis to the visible curve: 5 dB margin above the
+  // peak and below the trough.  Fall back to a sensible default range
+  // if `visible` happens to be empty.
+  const dBVals = visible.map((p) => p.dB);
+  const peak = dBVals.length ? Math.max(...dBVals) : 5;
+  const trough = dBVals.length ? Math.min(...dBVals) : -40;
+  const dBmax = peak + 5;
+  const dBmin = trough - 5;
+
   const xOf = (f: number) =>
-    pad + ((Math.log10(f) - Math.log10(fmin)) / (Math.log10(fmax) - Math.log10(fmin))) * (W - 2 * pad);
-  const yOf = (dB: number) =>
-    pad + ((dBmax - dB) / (dBmax - dBmin)) * (H - 2 * pad);
+    pad + ((Math.log10(f) - Math.log10(fMin)) / (Math.log10(fNyq) - Math.log10(fMin))) * (W - 2 * pad);
+  const yOf = (dB: number) => {
+    const clamped = Math.max(dBmin, Math.min(dBmax, dB));
+    return pad + ((dBmax - clamped) / (dBmax - dBmin)) * (H - 2 * pad);
+  };
   const toPath = (pts: { f: number; dB: number }[]) =>
     pts.map((p, i) => `${i === 0 ? "M" : "L"} ${xOf(p.f).toFixed(1)} ${yOf(p.dB).toFixed(1)}`).join(" ");
 
-  // ±3σ envelope (open-loop only)
-  const upper = measured.map((p) => ({ f: p.f, dB: p.dB + 3 * p.sigma }));
-  const lower = measured.map((p) => ({ f: p.f, dB: p.dB - 3 * p.sigma }));
-  const envelopePath =
-    "M " +
-    upper.map((p) => `${xOf(p.f).toFixed(1)} ${yOf(p.dB).toFixed(1)}`).join(" L ") +
-    " L " +
-    [...lower].reverse().map((p) => `${xOf(p.f).toFixed(1)} ${yOf(p.dB).toFixed(1)}`).join(" L ") +
-    " Z";
+  const fmtHz = (f: number) => {
+    if (f >= 1000) return `${(f / 1000).toFixed(1)} kHz`;
+    if (f >= 10) return `${f.toFixed(0)} Hz`;
+    if (f >= 1) return `${f.toFixed(1)} Hz`;
+    return `${f.toFixed(2)} Hz`;
+  };
 
-  const decades = [1, 10, 100, 1000];
-  const dBTicks = [-40, -20, 0];
+  // Decade gridlines inside [fMin, fNyq].
+  const decades: number[] = [];
+  for (let e = Math.ceil(Math.log10(fMin)); e <= Math.floor(Math.log10(fNyq)); e++) {
+    const f = Math.pow(10, e);
+    if (f >= fMin && f <= fNyq) decades.push(f);
+  }
+  // dB gridlines — choose a round step that gives ~3-5 interior ticks
+  // across the auto-scaled range.
+  const dBRange = dBmax - dBmin;
+  const dBStep =
+    dBRange > 60 ? 20 : dBRange > 30 ? 10 : dBRange > 12 ? 5 : dBRange > 4 ? 2 : 1;
+  const dBTicks: number[] = [];
+  for (let t = Math.ceil(dBmin / dBStep) * dBStep; t <= dBmax; t += dBStep) {
+    if (t > dBmin && t < dBmax) dBTicks.push(t);
+  }
 
   return (
     <svg width="100%" viewBox={`0 0 ${W} ${H}`} className="block">
@@ -139,45 +195,31 @@ function BodePlot({ closedLoop, achievedBw }: { closedLoop?: boolean; achievedBw
         <line key={`v${d}`} x1={xOf(d)} x2={xOf(d)} y1={pad} y2={H - pad} stroke="rgba(255,255,255,0.06)" strokeDasharray="2 3" />
       ))}
       {dBTicks.map((d) => (
-        <line key={`h${d}`} x1={pad} x2={W - pad} y1={yOf(d)} y2={yOf(d)} stroke="rgba(255,255,255,0.06)" strokeDasharray="2 3" />
+        <g key={`h${d}`}>
+          <line x1={pad} x2={W - pad} y1={yOf(d)} y2={yOf(d)} stroke="rgba(255,255,255,0.06)" strokeDasharray="2 3" />
+          <text x={pad - 3} y={yOf(d) + 2.5} fill="#6b7280" fontSize={7} fontFamily="monospace" textAnchor="end">{d}</text>
+        </g>
       ))}
-      {/* 0 dB reference */}
-      <line x1={pad} x2={W - pad} y1={yOf(0)} y2={yOf(0)} stroke="#6b7280" strokeWidth={0.6} />
+      {0 >= dBmin && 0 <= dBmax && (
+        <line x1={pad} x2={W - pad} y1={yOf(0)} y2={yOf(0)} stroke="#6b7280" strokeWidth={0.6} />
+      )}
+      {-3 >= dBmin && -3 <= dBmax && (
+        <line x1={pad} x2={W - pad} y1={yOf(-3)} y2={yOf(-3)} stroke={closedLoop ? "#34d399" : "#6b7280"} strokeWidth={0.6} strokeDasharray="2 2" />
+      )}
 
-      {/* Open-loop only: ±3σ uncertainty envelope under the curve */}
-      {!closedLoop && <path d={envelopePath} fill="#22d3ee" fillOpacity={0.16} stroke="none" />}
+      <path d={toPath(visible)} fill="none" stroke={closedLoop ? "#34d399" : "#22d3ee"} strokeWidth={1.4} />
 
-      {/* Measured curve */}
-      <path d={toPath(measured)} fill="none" stroke="#22d3ee" strokeWidth={1.4} />
-
-      {closedLoop && achievedBw && (
+      {closedLoop && achievedBw && achievedBw >= fMin && achievedBw <= fNyq && (
         <>
           <line x1={xOf(achievedBw)} x2={xOf(achievedBw)} y1={pad} y2={H - pad} stroke="#34d399" strokeDasharray="3 3" strokeWidth={1} />
           <text x={xOf(achievedBw) + 4} y={pad + 12} fill="#34d399" fontSize={9} fontFamily="monospace">
-            f_c = {achievedBw} Hz ✓
+            f_c = {achievedBw.toFixed(0)} Hz ✓
           </text>
         </>
       )}
-      <text x={pad} y={H - 6} fill="#6b7280" fontSize={8} fontFamily="monospace">1 Hz</text>
-      <text x={W - pad - 28} y={H - 6} fill="#6b7280" fontSize={8} fontFamily="monospace">2 kHz</text>
-      <text x={4} y={pad + 4} fill="#6b7280" fontSize={8} fontFamily="monospace">|G| dB</text>
-
-      {/* legend */}
-      {!closedLoop ? (
-        <g transform={`translate(${W - pad - 118}, ${pad + 6})`}>
-          <rect width={114} height={30} fill="rgba(5,7,13,0.85)" stroke="rgba(255,255,255,0.1)" rx={3} />
-          <line x1={6} x2={18} y1={11} y2={11} stroke="#22d3ee" strokeWidth={1.5} />
-          <text x={22} y={14} fill="#d1d5db" fontSize={8} fontFamily="monospace">Measured |G|</text>
-          <rect x={6} y={19} width={12} height={5} fill="#22d3ee" fillOpacity={0.25} />
-          <text x={22} y={24} fill="#d1d5db" fontSize={8} fontFamily="monospace">±3σ uncertainty</text>
-        </g>
-      ) : (
-        <g transform={`translate(${pad + 4}, ${H - pad - 22})`}>
-          <rect width={92} height={18} fill="rgba(5,7,13,0.85)" stroke="rgba(255,255,255,0.1)" rx={3} />
-          <line x1={6} x2={18} y1={10} y2={10} stroke="#22d3ee" strokeWidth={1.5} />
-          <text x={22} y={13} fill="#d1d5db" fontSize={8} fontFamily="monospace">Closed-loop |T|</text>
-        </g>
-      )}
+      <text x={pad} y={H - 6} fill="#6b7280" fontSize={8} fontFamily="monospace">{fmtHz(fMin)}</text>
+      <text x={W - pad - 40} y={H - 6} fill="#6b7280" fontSize={8} fontFamily="monospace">{fmtHz(fNyq)}</text>
+      <text x={4} y={pad + 4} fill="#6b7280" fontSize={8} fontFamily="monospace">{closedLoop ? "|T_cl| dB" : "|G| dB"}</text>
     </svg>
   );
 }
@@ -185,19 +227,39 @@ function BodePlot({ closedLoop, achievedBw }: { closedLoop?: boolean; achievedBw
 /* ---------------- scene 1: GUI ---------------- */
 
 function SceneGUI({
+  plantId,
+  setPlantId,
   specs,
   setSpecs,
   onSynthesize,
 }: {
+  plantId: string;
+  setPlantId: (id: string) => void;
   specs: Specs;
   setSpecs: (s: Specs) => void;
   onSynthesize: () => void;
 }) {
   const [pulsing, setPulsing] = useState(false);
+  const plant = useMemo(() => plantById(plantId), [plantId]);
+  const bwBounds = useMemo(() => bandwidthBoundsHz(specs.Ts), [specs.Ts]);
+
   const handleClick = () => {
     setPulsing(true);
     setTimeout(onSynthesize, 400);
   };
+
+  const handlePlantChange = (id: string) => {
+    const p = plantById(id);
+    setPlantId(id);
+    setSpecs({
+      desMm: p.defaults.desMm,
+      desBw: p.defaults.desBw,
+      desZeta: p.defaults.desZeta,
+      order: p.defaults.order,
+      Ts: TS_FIXED,
+    });
+  };
+
   return (
     <motion.div
       key="gui"
@@ -210,31 +272,27 @@ function SceneGUI({
       {/* LEFT — Plant Identification */}
       <div className="rounded-2xl bg-bg/60 border border-white/5 p-5">
         <div className="text-[10px] uppercase tracking-[0.2em] text-accent2 mb-3">
-          Plant identification
+          Plant · frequency response
         </div>
-        {/* dropzone */}
-        <div
-          className="group relative rounded-xl border-2 border-dashed border-accent2/40 hover:border-accent2 bg-accent2/[0.03] hover:bg-accent2/[0.06] transition-all py-7 px-5 text-center cursor-pointer"
-          style={{ boxShadow: "inset 0 0 40px rgba(34,211,238,0.04)" }}
-        >
-          <div className="absolute inset-0 rounded-xl opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none"
-               style={{ boxShadow: "0 0 24px rgba(34,211,238,0.3)" }} />
-          <Waves className="w-8 h-8 mx-auto text-accent2 opacity-70" />
-          <div className="mt-2 text-sm text-gray-200">
-            Drop frequency response data
-          </div>
-          <div className="text-[11px] font-mono text-gray-500 mt-0.5">
-            .csv  ·  .mat
-          </div>
+        <PlantPicker plantId={plantId} onChange={handlePlantChange} />
+
+        <div className="mt-3 rounded-lg bg-black/30 border border-white/5 p-3">
+          <Tex expr={plant.latex} block className="text-gray-200 text-[11.5px] overflow-x-auto" />
         </div>
-        {/* Bode plot */}
+        <div className="mt-2 text-[11px] text-gray-500 leading-relaxed">
+          {plant.description}
+        </div>
+
         <div className="mt-4">
           <div className="flex items-center justify-between text-[10px] font-mono text-gray-500 mb-1">
             <span>OPEN-LOOP BODE</span>
-            <span className="text-accent2">loaded · plant_042.csv</span>
+            <span className="text-accent2 inline-flex items-center gap-1">
+              <Waves className="w-3 h-3" />
+              {plant.id}
+            </span>
           </div>
           <div className="rounded-lg border border-white/5 bg-black/30 p-1">
-            <BodePlot />
+            <BodePlot plant={plant} specs={specs} />
           </div>
         </div>
       </div>
@@ -245,57 +303,64 @@ function SceneGUI({
           Desired closed-loop specifications
         </div>
         <SpecSlider
+          label="Modulus margin"
+          sym="ΔM_ib"
+          value={specs.desMm}
+          unit=""
+          min={0.1}
+          max={0.9}
+          step={0.05}
+          fmt={(v) => v.toFixed(2)}
+          onChange={(v) => setSpecs({ ...specs, desMm: v })}
+        />
+        <SpecSlider
           label="Closed-loop bandwidth"
           sym="f_c"
-          value={specs.bw}
+          value={specs.desBw}
           unit="Hz"
-          min={20}
-          max={400}
-          step={5}
-          onChange={(v) => setSpecs({ ...specs, bw: v })}
+          min={bwBounds.min}
+          max={bwBounds.max}
+          step={Math.max(1, (bwBounds.max - bwBounds.min) / 100)}
+          fmt={(v) => v.toFixed(0)}
+          onChange={(v) => setSpecs({ ...specs, desBw: v })}
+          hint={`F_s/25 .. F_s/8  (${bwBounds.min.toFixed(0)}–${bwBounds.max.toFixed(0)} Hz)`}
         />
         <SpecSlider
-          label="Phase margin"
-          sym="φ_m"
-          value={specs.pm}
-          unit="°"
-          min={20}
-          max={80}
-          step={1}
-          onChange={(v) => setSpecs({ ...specs, pm: v })}
-        />
-        <SpecSlider
-          label="Gain margin"
-          sym="G_m"
-          value={specs.gm}
-          unit="dB"
-          min={3}
-          max={20}
-          step={1}
-          onChange={(v) => setSpecs({ ...specs, gm: v })}
-        />
-        <SpecSlider
-          label="Sampling period"
-          sym="T_s"
-          value={specs.ts * 1e4}
-          unit="× 10⁻⁴ s"
-          min={0.5}
-          max={10}
-          step={0.5}
-          onChange={(v) => setSpecs({ ...specs, ts: v / 1e4 })}
+          label="Damping ratio"
+          sym="ζ"
+          value={specs.desZeta}
+          unit=""
+          min={0.1}
+          max={1.0}
+          step={0.05}
+          fmt={(v) => v.toFixed(2)}
+          onChange={(v) => setSpecs({ ...specs, desZeta: v })}
         />
 
-        <div className="mt-5">
-          <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1">
-            Controller structure
+        <div className="mt-4">
+          <div className="flex items-baseline justify-between text-xs">
+            <span className="text-gray-400">Sampling period</span>
+            <span className="font-mono text-white tabular-nums">
+              <span className="text-accent2">T_s</span> = {(specs.Ts * 1e6).toFixed(0)} µs
+            </span>
           </div>
-          <div className="relative">
-            <div className="w-full rounded-lg bg-white/[0.04] border border-white/10 px-3 py-2 text-sm text-gray-200 flex items-center justify-between">
-              <span>RST polynomial</span>
-              <ChevronDown className="w-4 h-4 text-gray-500" />
-            </div>
+          <div className="text-[10px] font-mono text-gray-600 mt-1">
+            F_s = {(1 / specs.Ts).toFixed(0)} Hz · fixed
           </div>
         </div>
+
+        <SpecSlider
+          label="Controller order"
+          sym="n"
+          value={specs.order ?? 5}
+          unit=""
+          min={3}
+          max={15}
+          step={1}
+          fmt={(v) => `${v}`}
+          onChange={(v) => setSpecs({ ...specs, order: Math.round(v) })}
+          hint={`RST · ${(specs.order ?? 5) + 1} coefficients · 1 integrator`}
+        />
 
         <motion.button
           onClick={handleClick}
@@ -315,6 +380,48 @@ function SceneGUI({
   );
 }
 
+function PlantPicker({
+  plantId,
+  onChange,
+}: {
+  plantId: string;
+  onChange: (id: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const current = PLANTS.find((p) => p.id === plantId) ?? PLANTS[0];
+  return (
+    <div className="relative">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="w-full rounded-lg bg-white/[0.04] border border-white/10 hover:border-accent2/50 px-3 py-2 text-sm text-gray-200 flex items-center justify-between transition-colors"
+      >
+        <span className="flex flex-col items-start text-left">
+          <span className="text-gray-100">{current.label}</span>
+          <span className="text-[10px] font-mono text-gray-500 mt-0.5">{current.sub}</span>
+        </span>
+        <ChevronDown className={`w-4 h-4 text-gray-500 transition-transform ${open ? "rotate-180" : ""}`} />
+      </button>
+      {open && (
+        <div className="absolute z-20 mt-1 w-full rounded-lg bg-[#0b0f1a] border border-white/15 shadow-xl overflow-hidden">
+          {PLANTS.map((p) => (
+            <button
+              key={p.id}
+              onClick={() => {
+                onChange(p.id);
+                setOpen(false);
+              }}
+              className={`w-full text-left px-3 py-2 hover:bg-white/[0.06] flex flex-col gap-0.5 transition-colors ${p.id === plantId ? "bg-accent2/[0.08]" : ""}`}
+            >
+              <span className="text-sm text-gray-100">{p.label}</span>
+              <span className="text-[10px] font-mono text-gray-500">{p.sub}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SpecSlider({
   label,
   sym,
@@ -323,6 +430,8 @@ function SpecSlider({
   min,
   max,
   step,
+  fmt,
+  hint,
   onChange,
 }: {
   label: string;
@@ -332,14 +441,17 @@ function SpecSlider({
   min: number;
   max: number;
   step: number;
+  fmt?: (v: number) => string;
+  hint?: string;
   onChange: (v: number) => void;
 }) {
+  const display = fmt ? fmt(value) : value.toFixed(step < 1 ? 1 : 0);
   return (
     <div className="mt-3 first:mt-0">
       <div className="flex items-baseline justify-between text-xs">
         <span className="text-gray-400">{label}</span>
         <span className="font-mono text-white tabular-nums">
-          <span className="text-accent2">{sym}</span> = {value.toFixed(step < 1 ? 1 : 0)} {unit}
+          <span className="text-accent2">{sym}</span> = {display} {unit}
         </span>
       </div>
       <input
@@ -351,6 +463,7 @@ function SpecSlider({
         onChange={(e) => onChange(parseFloat(e.target.value))}
         className="w-full accent-accent2 mt-1"
       />
+      {hint && <div className="text-[10px] font-mono text-gray-600 mt-0.5">{hint}</div>}
     </div>
   );
 }
@@ -368,11 +481,19 @@ function TypedPoly({
   prefix: string;
   delay: number;
 }) {
-  // Render coefficients as a polynomial in z⁻¹
+  // Render coefficients as a polynomial in z⁻¹.  Synthesis coefficients
+  // can span several decades; use a fixed 4-sig-fig scientific form for
+  // anything below 0.01 so tiny numerator terms don't print as "0.000".
+  const fmt = (c: number) => {
+    const abs = Math.abs(c);
+    if (abs === 0) return "0";
+    if (abs >= 0.01 && abs < 1000) return abs.toFixed(4);
+    return abs.toExponential(2);
+  };
   const full = coeffs
     .map((c, i) => {
-      const sign = i === 0 ? "" : c >= 0 ? " + " : " − ";
-      const val = Math.abs(c).toFixed(3);
+      const sign = i === 0 ? (c < 0 ? "−" : "") : c >= 0 ? " + " : " − ";
+      const val = fmt(c);
       const zpart = i === 0 ? "" : i === 1 ? "z⁻¹" : `z⁻${i}`;
       return `${sign}${val}${zpart ? " " + zpart : ""}`;
     })
@@ -403,14 +524,17 @@ function TypedPoly({
 }
 
 function SceneResults({
+  plantId,
   specs,
   results,
   onReset,
 }: {
+  plantId: string;
   specs: Specs;
-  results: Results;
+  results: SynthesisResult;
   onReset: () => void;
 }) {
+  const plant = useMemo(() => plantById(plantId), [plantId]);
   return (
     <motion.div
       key="results"
@@ -426,29 +550,28 @@ function SceneResults({
           Closed-loop verification
         </div>
         <div className="rounded-lg border border-white/5 bg-black/30 p-1">
-          <BodePlot closedLoop achievedBw={results.achievedBw} />
+          <BodePlot plant={plant} specs={specs} closedLoop achievedBw={results.achievedBw} results={results} height={220} />
         </div>
-        <div className="mt-4 grid grid-cols-2 gap-3">
-          <div className="rounded-xl border border-good/30 bg-good/5 p-3">
+        <div className="mt-3 grid grid-cols-2 gap-3">
+          <div className="rounded-xl border border-good/30 bg-good/5 px-3 py-2">
             <div className="text-[10px] uppercase tracking-wider text-gray-500">Achieved bandwidth</div>
-            <div className="mt-0.5 font-mono text-lg text-good">
-              f_c = {results.achievedBw} Hz ✓
+            <div className="font-mono text-sm text-good">
+              f_c = {results.achievedBw.toFixed(1)} Hz ✓
             </div>
           </div>
-          <div className="rounded-xl border border-good/30 bg-good/5 p-3">
-            <div className="text-[10px] uppercase tracking-wider text-gray-500">Phase margin</div>
-            <div className="mt-0.5 font-mono text-lg text-good">
-              φ_m = {results.achievedPm}° ✓
+          <div className="rounded-xl border border-good/30 bg-good/5 px-3 py-2">
+            <div className="text-[10px] uppercase tracking-wider text-gray-500">H∞ norm</div>
+            <div className="font-mono text-sm text-good">
+              ‖T_zw‖∞ = {results.gammaOpt.toFixed(3)}
             </div>
           </div>
         </div>
-        <div className="mt-4 flex items-center gap-2 text-xs text-gray-400">
+        <div className="mt-3 flex items-center gap-2 text-xs text-gray-400">
           <Database className="w-3.5 h-3.5 text-good" />
           <span className="inline-flex items-center gap-1.5">
             <span className="inline-block w-1.5 h-1.5 rounded-full bg-good animate-pulse" />
-            Controller saved to database
+            {results.iterations.length} bisection iterations · SCS-WASM
           </span>
-          <span className="font-mono text-gray-600">· id = 0x{Math.floor(Math.random() * 0xffff).toString(16)}</span>
         </div>
       </div>
 
@@ -461,16 +584,16 @@ function SceneResults({
           <CheckCircle2 className="w-4 h-4 text-good" />
         </div>
         <div className="space-y-4">
-          <TypedPoly label="Numerator — feedforward" prefix="T(z⁻¹)" coeffs={results.T} delay={0} />
-          <TypedPoly label="Numerator — feedback" prefix="R(z⁻¹)" coeffs={results.R} delay={400} />
-          <TypedPoly label="Denominator" prefix="S(z⁻¹)" coeffs={results.S} delay={900} />
+          <TypedPoly label="Numerator — feedforward" prefix="T(z⁻¹)" coeffs={results.TFull} delay={0} />
+          <TypedPoly label="Numerator — feedback"  prefix="R(z⁻¹)" coeffs={results.RFull} delay={400} />
+          <TypedPoly label="Denominator · has (1−z⁻¹) integrator"   prefix="S(z⁻¹)" coeffs={results.SFull} delay={900} />
         </div>
         <div className="mt-5 rounded-lg bg-black/30 border border-white/5 p-3 font-mono text-[10px] text-gray-500 leading-relaxed">
           <div className="text-gray-400"># closed-loop transfer function</div>
           <div>
             T_cl(z⁻¹) ={" "}
-            <span className="text-accent2">T(z⁻¹) · Ĝ(z)</span>{" "}
-            / <span className="text-fuchsia-300">(A(z)·S(z) + B(z)·R(z))</span>
+            <span className="text-accent2">G(z)·T(z⁻¹)</span>{" "}
+            / <span className="text-fuchsia-300">(G(z)·MA(z)·R(z⁻¹) + S(z⁻¹))</span>
           </div>
         </div>
         <button
@@ -488,25 +611,94 @@ function SceneResults({
 
 export default function CERNDemo() {
   const [scene, setScene] = useState<Scene>("gui");
+  const [plantId, setPlantId] = useState<string>(PLANTS[0].id);
   const [specs, setSpecs] = useState<Specs>({
-    bw: 120,
-    pm: 45,
-    gm: 10,
-    ts: 1e-4,
+    desMm: PLANTS[0].defaults.desMm,
+    desBw: PLANTS[0].defaults.desBw,
+    desZeta: PLANTS[0].defaults.desZeta,
+    order: PLANTS[0].defaults.order,
+    Ts: TS_FIXED,
   });
-  const [results, setResults] = useState<Results | null>(null);
+  const [results, setResults] = useState<SynthesisResult | null>(null);
+  const [progress, setProgress] = useState<ProgressEvent | null>(null);
+  const [gammaHistory, setGammaHistory] = useState<ProgressEvent[]>([]);
+  const [infeasibleHint, setInfeasibleHint] = useState<string | null>(null);
   const [replayKey, setReplayKey] = useState(0);
+  const [pipelineDone, setPipelineDone] = useState(false);
+  const solveHandle = useRef<{ cancel: () => void } | null>(null);
+  const solveTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Terminate the worker when the component unmounts so dev-HMR doesn't
+  // accumulate orphaned WASM instances.
+  useEffect(() => () => disposeHinfWorker(), []);
 
   const handleSynthesize = () => {
-    setResults(synthesize(specs));
+    setResults(null);
+    setProgress(null);
+    setGammaHistory([]);
+    setInfeasibleHint(null);
+    setPipelineDone(false);
     setScene("pipeline");
+    if (solveTimeout.current) clearTimeout(solveTimeout.current);
+    const handle = synthesizeInWorker(plantId, specs, (p) => {
+      setProgress(p);
+      setGammaHistory((prev) =>
+        prev.length && prev[prev.length - 1].iter === p.iter ? prev : [...prev, p],
+      );
+    });
+    solveHandle.current = handle;
+    // Wall-clock timeout: if the worker can't finish in 45 s, cancel and
+    // surface an infeasibility hint.  The 3D scene is already hovering
+    // on the H∞ block so the user just sees a graceful transition.
+    solveTimeout.current = setTimeout(() => {
+      handle.cancel();
+      setInfeasibleHint(
+        "Synthesis timed out. Try relaxing the modulus margin, lowering the bandwidth, or raising the damping ratio.",
+      );
+    }, 45000);
+    const clear = () => {
+      if (solveTimeout.current) {
+        clearTimeout(solveTimeout.current);
+        solveTimeout.current = null;
+      }
+    };
+    handle.promise
+      .then((res) => {
+        clear();
+        if (res.feasible) {
+          setResults(res);
+        } else {
+          setInfeasibleHint(res.infeasibilityHint ?? "No feasible controller for these specs.");
+        }
+      })
+      .catch((err) => {
+        clear();
+        setInfeasibleHint(err?.message ?? "Synthesis failed");
+      });
   };
+
   const handlePipelineComplete = () => {
-    // brief pause so the "SYNTHESIS COMPLETE" reads before the hand-off
-    setTimeout(() => setScene("results"), 700);
+    // Mark pipeline done; a useEffect below handles the transition
+    // once the solver also resolves (avoids a stale-closure race where
+    // the poll reads a snapshot of `results` taken when the pipeline
+    // finished, instead of the live state).
+    setPipelineDone(true);
   };
+
+  // Transition to results / back to GUI once BOTH the pipeline animation
+  // finished and the solver Promise has resolved.
+  useEffect(() => {
+    if (scene !== "pipeline" || !pipelineDone) return;
+    if (infeasibleHint) {
+      setScene("gui");
+    } else if (results) {
+      setScene("results");
+    }
+  }, [scene, pipelineDone, results, infeasibleHint]);
+
   const handleReplay = () => setReplayKey((k) => k + 1);
   const handleReset = () => {
+    setInfeasibleHint(null);
     setScene("gui");
   };
 
@@ -526,9 +718,8 @@ export default function CERNDemo() {
             <p className="mt-2 text-sm text-gray-400 max-w-2xl leading-relaxed">
               The LHC&apos;s magnets need controllers tuned to parts per million
               precision, but each power converter behaves a little differently.
-              This demo recreates the automated pipeline I built at CERN: feed
-              in a frequency response, pick your performance specs, and get
-              back a controller ready to flash onto the hardware.
+              Pick a plant, pick your specs — the H∞ data-driven RST solve runs
+              in your browser via SCS-WASM, off the UI thread.
             </p>
           </div>
           <div className="text-[10px] font-mono text-gray-500 uppercase tracking-wider">
@@ -536,12 +727,40 @@ export default function CERNDemo() {
           </div>
         </div>
 
+        {/* infeasibility toast */}
+        <AnimatePresence>
+          {infeasibleHint && scene === "gui" && (
+            <motion.div
+              initial={{ opacity: 0, y: -10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -10 }}
+              className="mb-4 rounded-xl border border-amber-500/40 bg-amber-500/5 p-3 flex items-start gap-2"
+            >
+              <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+              <div className="flex-1">
+                <div className="text-[11px] font-mono uppercase tracking-wider text-amber-400 mb-0.5">
+                  Synthesis infeasible
+                </div>
+                <div className="text-[12px] text-gray-300 leading-relaxed">{infeasibleHint}</div>
+              </div>
+              <button
+                onClick={() => setInfeasibleHint(null)}
+                className="text-gray-500 hover:text-gray-300 text-xs font-mono px-2"
+              >
+                dismiss
+              </button>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
         {/* scene container */}
         <div className="mt-6 relative">
           <AnimatePresence mode="wait">
             {scene === "gui" && (
               <SceneGUI
                 key="gui"
+                plantId={plantId}
+                setPlantId={setPlantId}
                 specs={specs}
                 setSpecs={setSpecs}
                 onSynthesize={handleSynthesize}
@@ -557,7 +776,14 @@ export default function CERNDemo() {
                 className="relative rounded-2xl overflow-hidden border border-white/5 bg-black/40"
                 style={{ height: 560 }}
               >
-                <CERNPipeline3D key={replayKey} onComplete={handlePipelineComplete} />
+                <CERNPipeline3D
+                  key={replayKey}
+                  onComplete={handlePipelineComplete}
+                  progress={progress}
+                  gammaHistory={gammaHistory}
+                  infeasible={!!infeasibleHint}
+                  solverDone={!!results || !!infeasibleHint}
+                />
                 <div className="absolute top-3 right-3 z-10 flex items-center gap-2">
                   <button
                     onClick={handleReplay}
@@ -565,18 +791,21 @@ export default function CERNDemo() {
                   >
                     <RotateCcw className="w-3 h-3" /> Replay
                   </button>
-                  <button
-                    onClick={() => setScene("results")}
-                    className="inline-flex items-center gap-1.5 rounded-full border border-white/15 bg-black/50 backdrop-blur px-3 py-1.5 text-[11px] font-mono uppercase tracking-wider text-gray-300 hover:text-white hover:border-white/40 transition-colors"
-                  >
-                    Skip →
-                  </button>
+                  {results && (
+                    <button
+                      onClick={() => setScene("results")}
+                      className="inline-flex items-center gap-1.5 rounded-full border border-white/15 bg-black/50 backdrop-blur px-3 py-1.5 text-[11px] font-mono uppercase tracking-wider text-gray-300 hover:text-white hover:border-white/40 transition-colors"
+                    >
+                      Skip →
+                    </button>
+                  )}
                 </div>
               </motion.div>
             )}
             {scene === "results" && results && (
               <SceneResults
                 key="results"
+                plantId={plantId}
                 specs={specs}
                 results={results}
                 onReset={handleReset}
@@ -660,7 +889,7 @@ function HInfFormulation({ specs }: { specs: Specs }) {
   const noiseExpr = String.raw`\bigl\lvert\,A_k^{-1}\,G_f^{\,k}\,S^{\,k}(\rho)\bigr\rvert^{2} \;<\; 2\,\Re\bigl\{\psi^{k}(\rho)\,\psi^{\star,k}(\rho_0)\bigr\} - \bigl\lvert\psi^{k}(\rho_0)\bigr\rvert^{2}`;
   const ctrlStabExpr = String.raw`\Re\{\,S(\rho)\,\} \;>\; 0 \qquad \forall\,\omega\in\Omega := \bigl[\,0,\,\pi/T_s\,\bigr]`;
 
-  const Ts_us = (specs.ts * 1e6).toFixed(0);
+  const Ts_us = (specs.Ts * 1e6).toFixed(0);
 
   return (
     <div className="mt-6 rounded-2xl border border-white/10 bg-black/30 p-5 md:p-6">

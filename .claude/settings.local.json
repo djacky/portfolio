@@ -95,7 +95,22 @@
       "Bash(node_modules/.bin/tsc --noEmit)",
       "Bash(SEEDS=3 MATCHES=150 npx tsx scripts/matchmaker-harness.ts)",
       "Bash(tee /tmp/diagnosis.log)",
-      "Bash(xargs cat *)"
+      "Bash(xargs cat *)",
+      "Bash(xargs grep *)",
+      "Bash(npx tsx *)",
+      "Bash(npm view *)",
+      "Bash(PLANT=magnet-rl npx tsx scripts/hinf-feasibility-harness.ts)",
+      "Bash(STRESS=1 npx tsx scripts/hinf-feasibility-harness.ts)",
+      "Bash(export PATH=\"/c/Windows/System32:/c/Windows:$PATH\")",
+      "Bash(\"/c/Program Files/nodejs/node\" ./node_modules/typescript/bin/tsc --noEmit)",
+      "Bash(\"/c/Program Files/nodejs/node\" ./node_modules/next/dist/bin/next lint)",
+      "Bash(\"/c/Program Files/nodejs/node\" ./node_modules/typescript/bin/tsc --noEmit -p .)",
+      "Bash(\"/c/Program Files/nodejs/node\" /e/Projects/portfolio/node_modules/typescript/bin/tsc --noEmit -p /e/Projects/portfolio)",
+      "Bash(grep -oE '\"[a-zA-Z_]{1,30}\"' /e/Projects/portfolio/node_modules/scs-solver/dist/scs.mjs)",
+      "Bash(grep -oE '\"[a-zA-Z_]{1,30}\":\\\\|\\\\.[a-zA-Z_]{1,20}\\\\[' /e/Projects/portfolio/node_modules/scs-solver/dist/scs.mjs)",
+      "PowerShell(npx next dev 2>&1)",
+      "PowerShell(try { $r = Invoke-WebRequest -UseBasicParsing -Uri http://localhost:3001/ -TimeoutSec 30; \"status=$\\($r.StatusCode\\) bytes=$\\($r.Content.Length\\)\" } catch { \"FAIL: $\\($_.Exception.Message\\)\" })",
+      "PowerShell(npx next build 2>&1 | Select-String -Pattern \"\\(error|Error|ERROR|fail|Fail|Compiled|✓|✗\\)\" | Select-Object -First 20; \"exit=$LASTEXITCODE\")"
     ]
   }
 }

@@ -4,6 +4,7 @@ import { RoundedBox, Text, Html, Cylinder } from "@react-three/drei";
 import { EffectComposer, Bloom } from "@react-three/postprocessing";
 import { useRef, useMemo, useState, useEffect } from "react";
 import * as THREE from "three";
+import type { ProgressEvent } from "@/lib/hinf-worker-client";
 
 /* ------------------------------------------------------------------
    CERN — backend request flight.
@@ -367,9 +368,30 @@ function WorkerPool({ tRef }: { tRef: React.MutableRefObject<number> }) {
 
 /* ---------------- H∞ solver core with live Nyquist visualization ---------------- */
 
-function NyquistCurve({ tRef }: { tRef: React.MutableRefObject<number> }) {
+interface PacedState {
+  gamma: number;
+  bw: number | null;
+  iter: number;
+  idx: number;
+  total: number;
+  /** Smooth [0,1] convergence fraction derived from γ, used for the Nyquist
+   *  morph.  Stays at 0 until history has at least one entry. */
+  k: number;
+}
+
+function NyquistCurve({
+  tRef,
+  pacedRef,
+  infeasible,
+}: {
+  tRef: React.MutableRefObject<number>;
+  pacedRef: React.MutableRefObject<PacedState>;
+  infeasible: boolean;
+}) {
   const tubeRef = useRef<THREE.Mesh>(null);
   const uncRef = useRef<THREE.Mesh>(null);
+  const tubeMatRef = useRef<THREE.MeshStandardMaterial>(null);
+  const uncMatRef = useRef<THREE.MeshBasicMaterial>(null);
   const N = 96;
 
   // Build a curve in (Re, Im, depth=log-frequency) parameterized by k ∈ [0,1].
@@ -394,15 +416,11 @@ function NyquistCurve({ tRef }: { tRef: React.MutableRefObject<number> }) {
   };
 
   useFrame(() => {
-    const t = tRef.current;
-    let k = 0;
-    if (t < PHASES.solve.start) k = 0;
-    else if (t > PHASES.solve.end - 0.2) k = 1;
-    else {
-      const u = (t - PHASES.solve.start) / (PHASES.solve.end - PHASES.solve.start - 0.2);
-      // ease-in-out
-      k = u * u * (3 - 2 * u);
-    }
+    // Drive the Nyquist morph from the paced convergence state so the
+    // curve sweep stays locked to the HUD's γ ticker.
+    let k = pacedRef.current.k;
+    if (infeasible) k = 0;
+
     const curve = buildCurve(k);
     if (tubeRef.current) {
       const newGeom = new THREE.TubeGeometry(curve, 96, 0.04, 12, false);
@@ -410,10 +428,18 @@ function NyquistCurve({ tRef }: { tRef: React.MutableRefObject<number> }) {
       tubeRef.current.geometry = newGeom;
     }
     if (uncRef.current) {
-      // ±3σ uncertainty band — wider tube around the mean
       const uncGeom = new THREE.TubeGeometry(curve, 96, 0.13, 12, false);
       uncRef.current.geometry.dispose();
       uncRef.current.geometry = uncGeom;
+    }
+    // Color shift on infeasibility: amber → red.
+    const tgt = infeasible ? 0xef4444 : 0xfbbf24;
+    if (tubeMatRef.current) {
+      tubeMatRef.current.color.lerp(new THREE.Color(tgt), 0.12);
+      tubeMatRef.current.emissive.lerp(new THREE.Color(tgt), 0.12);
+    }
+    if (uncMatRef.current) {
+      uncMatRef.current.color.lerp(new THREE.Color(tgt), 0.12);
     }
   });
 
@@ -440,36 +466,173 @@ function NyquistCurve({ tRef }: { tRef: React.MutableRefObject<number> }) {
       {/* uncertainty wrapper */}
       <mesh ref={uncRef}>
         <tubeGeometry args={[new THREE.CatmullRomCurve3([new THREE.Vector3(), new THREE.Vector3(0.01,0,0)]), 8, 0.13, 8, false]} />
-        <meshBasicMaterial color="#fbbf24" transparent opacity={0.15} toneMapped={false} />
+        <meshBasicMaterial ref={uncMatRef} color="#fbbf24" transparent opacity={0.15} toneMapped={false} />
       </mesh>
       {/* mean Nyquist curve */}
       <mesh ref={tubeRef}>
         <tubeGeometry args={[new THREE.CatmullRomCurve3([new THREE.Vector3(), new THREE.Vector3(0.01,0,0)]), 8, 0.04, 8, false]} />
-        <meshStandardMaterial color="#fbbf24" emissive="#fbbf24" emissiveIntensity={2.2} toneMapped={false} />
+        <meshStandardMaterial ref={tubeMatRef} color="#fbbf24" emissive="#fbbf24" emissiveIntensity={2.2} toneMapped={false} />
       </mesh>
     </group>
   );
 }
 
-function SolverCore({ tRef }: { tRef: React.MutableRefObject<number> }) {
+function GammaSparkline({
+  history,
+  pacedIdx,
+}: {
+  history: ProgressEvent[];
+  pacedIdx: number;
+}) {
+  if (history.length < 2) {
+    return (
+      <div
+        style={{
+          marginTop: 4,
+          height: 24,
+          display: "flex",
+          alignItems: "center",
+          color: "#6b7280",
+          fontSize: 9,
+        }}
+      >
+        {history.length === 0 ? "awaiting solver…" : "first iter received"}
+      </div>
+    );
+  }
+  const W = 216;
+  const H = 28;
+  const pad = 2;
+  const gammas = history.map((h) => h.gamma);
+  const gMin = Math.min(...gammas);
+  const gMax = Math.max(...gammas);
+  const span = Math.max(1e-6, gMax - gMin);
+  const xOf = (i: number) => pad + (i / Math.max(1, history.length - 1)) * (W - 2 * pad);
+  const yOf = (g: number) => pad + (1 - (g - gMin) / span) * (H - 2 * pad);
+  const pathAll = history
+    .map((h, i) => `${i === 0 ? "M" : "L"} ${xOf(i).toFixed(1)} ${yOf(h.gamma).toFixed(1)}`)
+    .join(" ");
+  const pathShown = history
+    .slice(0, pacedIdx + 1)
+    .map((h, i) => `${i === 0 ? "M" : "L"} ${xOf(i).toFixed(1)} ${yOf(h.gamma).toFixed(1)}`)
+    .join(" ");
+  const cx = xOf(pacedIdx);
+  const cy = yOf(history[pacedIdx].gamma);
+  return (
+    <svg
+      width={W}
+      height={H}
+      style={{ display: "block", marginTop: 4, background: "rgba(251,191,36,0.04)", borderRadius: 4 }}
+    >
+      <path d={pathAll} fill="none" stroke="rgba(251,191,36,0.22)" strokeWidth={1} />
+      <path d={pathShown} fill="none" stroke="#fbbf24" strokeWidth={1.4} />
+      <circle cx={cx} cy={cy} r={2.4} fill="#fde68a" stroke="#fbbf24" strokeWidth={0.8} />
+      <text x={W - pad} y={H - pad - 1} fill="#6b7280" fontSize={7} textAnchor="end" fontFamily="ui-monospace, Menlo, monospace">
+        γ
+      </text>
+    </svg>
+  );
+}
+
+function SolverCore({
+  tRef,
+  progress,
+  gammaHistory,
+  infeasible,
+}: {
+  tRef: React.MutableRefObject<number>;
+  progress: ProgressEvent | null;
+  gammaHistory: ProgressEvent[];
+  infeasible: boolean;
+}) {
   const [cost, setCost] = useState(8.42);
+  const [iter, setIter] = useState(0);
+  const [bwHz, setBwHz] = useState<number | null>(null);
+  const [pacedIdx, setPacedIdx] = useState(0);
   const matRef = useRef<THREE.MeshPhysicalMaterial>(null);
+  const groupRef = useRef<THREE.Group>(null);
+  const edgeMatRef = useRef<THREE.LineBasicMaterial>(null);
+
+  // Keep the live history accessible from useFrame without re-creating it
+  // on every render.
+  const historyRef = useRef<ProgressEvent[]>(gammaHistory);
+  useEffect(() => {
+    historyRef.current = gammaHistory;
+  }, [gammaHistory]);
+
+  // Paced state shared with NyquistCurve so both update in lockstep.
+  const pacedRef = useRef<PacedState>({ gamma: 0, bw: null, iter: 0, idx: 0, total: 0, k: 0 });
+
   useFrame(() => {
     const t = tRef.current;
-    if (t >= PHASES.solve.start && t <= PHASES.solve.end) {
-      const u = (t - PHASES.solve.start) / (PHASES.solve.end - PHASES.solve.start);
-      const next = 8.42 * Math.exp(-3.2 * u) + 0.84;
-      setCost(next);
+    const hist = historyRef.current;
+
+    // Animate the γ ticker over the first ~65% of the solve phase, then
+    // hold the final value while the camera lingers.
+    const solveDur = PHASES.solve.end - PHASES.solve.start;
+    const pacingDur = Math.max(1e-6, solveDur * 0.65);
+    const u = Math.max(0, Math.min(1, (t - PHASES.solve.start) / pacingDur));
+    const smooth = u * u * (3 - 2 * u);
+
+    if (hist.length > 0) {
+      const targetIdx = Math.max(0, Math.min(hist.length - 1, Math.floor(smooth * hist.length)));
+      const h = hist[targetIdx];
+      const hinfNorm = h.gamma > 1e-6 ? 1 / h.gamma : 99;
+      setCost((c) => c + (Math.min(hinfNorm, 99) - c) * 0.22);
+      if (h.iter !== iter) setIter(h.iter);
+      if (h.bw !== bwHz) setBwHz(h.bw);
+      if (targetIdx !== pacedIdx) setPacedIdx(targetIdx);
+
+      const kConv = Math.max(0, Math.min(1, (h.gamma - 0.2) / 0.8));
+      pacedRef.current = {
+        gamma: h.gamma,
+        bw: h.bw,
+        iter: h.iter,
+        idx: targetIdx,
+        total: hist.length,
+        k: kConv,
+      };
+    } else if (t >= PHASES.solve.start && t <= PHASES.solve.end) {
+      // Fallback: worker hasn't reported yet — decay the cost so the slab
+      // doesn't look dead before the first progress event lands.
+      const uu = (t - PHASES.solve.start) / solveDur;
+      setCost(8.42 * Math.exp(-3.2 * uu) + 0.84);
+      pacedRef.current = { ...pacedRef.current, k: uu * uu * (3 - 2 * uu) };
     }
+
+    // Emissive color + intensity: amber when normal, red on infeasibility.
     if (matRef.current) {
       const active = t >= PHASES.solve.start && t <= PHASES.solve.end;
-      const target = active ? 2.0 : 0.5;
+      const target = infeasible ? 2.6 : active ? 2.0 : 0.5;
       matRef.current.emissiveIntensity += (target - matRef.current.emissiveIntensity) * 0.1;
+      const tgtColor = new THREE.Color(infeasible ? 0xef4444 : 0xfbbf24);
+      matRef.current.emissive.lerp(tgtColor, 0.12);
+    }
+    if (edgeMatRef.current) {
+      const tgtColor = new THREE.Color(infeasible ? 0xef4444 : 0xfbbf24);
+      edgeMatRef.current.color.lerp(tgtColor, 0.12);
+    }
+
+    // Shake the core on infeasibility.
+    if (groupRef.current) {
+      if (infeasible) {
+        const k = performance.now() * 0.03;
+        groupRef.current.position.x = POS.solver.x + Math.sin(k) * 0.06;
+        groupRef.current.position.z = POS.solver.z + Math.cos(k * 1.3) * 0.06;
+      } else {
+        groupRef.current.position.x += (POS.solver.x - groupRef.current.position.x) * 0.2;
+        groupRef.current.position.z += (POS.solver.z - groupRef.current.position.z) * 0.2;
+      }
     }
   });
+
   const inSolve = tRef.current >= PHASES.solve.start - 0.1 && tRef.current <= PHASES.solve.end;
+  const hudColor = infeasible ? "#ef4444" : "#fbbf24";
+  const hudBorder = infeasible ? "rgba(239,68,68,0.6)" : "rgba(251,191,36,0.5)";
+  const hudGlow = infeasible ? "rgba(239,68,68,0.35)" : "rgba(251,191,36,0.3)";
+
   return (
-    <group position={POS.solver}>
+    <group ref={groupRef} position={POS.solver}>
       {/* core slab */}
       <RoundedBox args={[3.0, 1.6, 2.0]} radius={0.18} smoothness={6}>
         <meshPhysicalMaterial
@@ -485,16 +648,16 @@ function SolverCore({ tRef }: { tRef: React.MutableRefObject<number> }) {
       </RoundedBox>
       <lineSegments>
         <edgesGeometry args={[new THREE.BoxGeometry(3.0, 1.6, 2.0)]} />
-        <lineBasicMaterial color="#fbbf24" transparent opacity={0.85} toneMapped={false} />
+        <lineBasicMaterial ref={edgeMatRef} color="#fbbf24" transparent opacity={0.85} toneMapped={false} />
       </lineSegments>
       <Text position={[0, 1.35, 0]} fontSize={0.32} color="#ffffff" anchorX="center" outlineWidth={0.01} outlineColor="#000">
         H∞ solver
       </Text>
-      <Text position={[0, 1.02, 0]} fontSize={0.18} color="#fde68a" outlineWidth={0.008} outlineColor="#000" anchorX="center">
-        CVXPY · MOSEK · SDP
+      <Text position={[0, 1.02, 0]} fontSize={0.18} color={infeasible ? "#fca5a5" : "#fde68a"} outlineWidth={0.008} outlineColor="#000" anchorX="center">
+        SCS-WASM · SOCP · data-driven RST
       </Text>
 
-      <NyquistCurve tRef={tRef} />
+      <NyquistCurve tRef={tRef} pacedRef={pacedRef} infeasible={infeasible} />
 
       {/* HUD: cost ticker + solver state */}
       <Html position={[0, -1.5, 1.0]} distanceFactor={9} style={{ pointerEvents: "none", transform: "translate(-50%, -100%)" }}>
@@ -503,24 +666,60 @@ function SolverCore({ tRef }: { tRef: React.MutableRefObject<number> }) {
             fontFamily: "ui-monospace, Menlo, monospace",
             fontSize: 10,
             background: "rgba(5,7,13,0.9)",
-            border: "1px solid rgba(251,191,36,0.5)",
-            boxShadow: "0 0 28px rgba(251,191,36,0.3)",
+            border: `1px solid ${hudBorder}`,
+            boxShadow: `0 0 28px ${hudGlow}`,
             borderRadius: 8,
             padding: "8px 12px",
-            color: "#fbbf24",
-            minWidth: 230,
-            opacity: inSolve ? 1 : 0.3,
+            color: hudColor,
+            minWidth: 240,
+            opacity: inSolve || progress || infeasible ? 1 : 0.3,
             transition: "opacity 0.3s",
           }}
         >
-          <div style={{ color: "#fde68a", marginBottom: 4 }}>minimize ‖T_zw‖∞</div>
-          <div style={{ color: "#cbd5e1" }}>
-            cost ={" "}
-            <span style={{ color: "#fbbf24", fontWeight: 700 }}>{cost.toFixed(3)}</span>
-          </div>
-          <div style={{ color: "#94a3b8", fontSize: 9, marginTop: 3 }}>
-            s.t.  φ_m ≥ 45°,  ±3σ FRD robustness
-          </div>
+          {infeasible ? (
+            <>
+              <div style={{ color: "#fca5a5", marginBottom: 4, fontWeight: 700 }}>
+                INFEASIBLE
+              </div>
+              <div style={{ color: "#cbd5e1", fontSize: 9 }}>
+                no feasible controller at requested specs
+              </div>
+            </>
+          ) : (
+            <>
+              <div style={{ color: "#fde68a", marginBottom: 4, display: "flex", justifyContent: "space-between", gap: 10 }}>
+                <span>min ‖T_zw‖∞ · iter {iter.toString().padStart(2, " ")}</span>
+                <span style={{ color: "#94a3b8", fontSize: 9 }}>
+                  {gammaHistory.length > 0 ? `${pacedIdx + 1}/${gammaHistory.length}` : "—"}
+                </span>
+              </div>
+              <div style={{ color: "#cbd5e1" }}>
+                γ ={" "}
+                <span style={{ color: "#fbbf24", fontWeight: 700 }}>
+                  {gammaHistory.length > 0
+                    ? gammaHistory[Math.min(pacedIdx, gammaHistory.length - 1)].gamma.toFixed(4)
+                    : "—"}
+                </span>
+              </div>
+              <div style={{ color: "#cbd5e1" }}>
+                ‖T‖∞ ≤{" "}
+                <span style={{ color: "#fbbf24", fontWeight: 700 }}>{cost.toFixed(3)}</span>
+              </div>
+              <div style={{ color: "#cbd5e1" }}>
+                bw ={" "}
+                <span style={{ color: "#fbbf24", fontWeight: 700 }}>
+                  {bwHz != null && isFinite(bwHz) ? `${bwHz.toFixed(1)} Hz` : "—"}
+                </span>
+              </div>
+              <GammaSparkline
+                history={gammaHistory}
+                pacedIdx={Math.min(pacedIdx, Math.max(0, gammaHistory.length - 1))}
+              />
+              <div style={{ color: "#94a3b8", fontSize: 9, marginTop: 3 }}>
+                s.t. modulus-margin + shape via per-ω SOCP
+              </div>
+            </>
+          )}
         </div>
       </Html>
     </group>
@@ -655,13 +854,56 @@ function ConnectorTube({ from, to, color, dip = -0.5 }: { from: THREE.Vector3; t
 
 /* ---------------- camera rig ---------------- */
 
-function CameraRig({ tRef }: { tRef: React.MutableRefObject<number> }) {
+// Timeline point where the pipeline pauses waiting on the solver.  Just
+// before the solver→postgres transition so we can seamlessly continue
+// into the persist phase once the optimization finishes.
+const SOLVE_HOLD_T = PHASES.solve.end - 0.3;
+
+function CameraRig({
+  tRef,
+  holdClockRef,
+  holdingRef,
+}: {
+  tRef: React.MutableRefObject<number>;
+  holdClockRef: React.MutableRefObject<number>;
+  holdingRef: React.MutableRefObject<boolean>;
+}) {
   const { camera } = useThree();
   const lookAt = useRef(new THREE.Vector3());
   const pktTmp = useMemo(() => new THREE.Vector3(), []);
+  // Captured on the first hold frame: the phase offset that makes the
+  // oscillation start exactly at the camera's landing angle.  This kills
+  // the discontinuity between the solve-phase orbit and the hover sweep,
+  // so there is no visible "snap" at hold entry.
+  const phaseRef = useRef<number | null>(null);
+  const AMP = Math.PI / 4;        // ±45°
+  const OMEGA = 0.28;             // rad/s — period ≈ 22s
+
   useFrame(() => {
-    packetPos(tRef.current, pktTmp);
-    cameraTarget(tRef.current, pktTmp, _camPosTmp, _camLookTmp);
+    if (holdingRef.current) {
+      if (phaseRef.current === null) {
+        const dx = camera.position.x - POS.solver.x;
+        const dz = camera.position.z - POS.solver.z;
+        const entry = Math.atan2(dx, dz);                  // ∈ [-π, π]
+        const c0 = Math.max(-1, Math.min(1, entry / AMP));
+        // cos(phi) = entry/AMP → at holdClock=0, ang = AMP·cos(phi) = entry.
+        // Derivative at c=0 is −AMP·ω·sin(phi); with phi ∈ [0, π] this is
+        // ≤ 0, so the first motion heads toward −AMP (no back-and-forth).
+        phaseRef.current = Math.acos(c0);
+      }
+      const ang = AMP * Math.cos(OMEGA * holdClockRef.current + phaseRef.current);
+      const r = 7.0;
+      _camPosTmp.set(
+        POS.solver.x + Math.sin(ang) * r,
+        3.4,
+        POS.solver.z + Math.cos(ang) * r,
+      );
+      _camLookTmp.set(POS.solver.x, 1.4, POS.solver.z);
+    } else {
+      phaseRef.current = null;
+      packetPos(tRef.current, pktTmp);
+      cameraTarget(tRef.current, pktTmp, _camPosTmp, _camLookTmp);
+    }
     camera.position.lerp(_camPosTmp, 0.06);
     lookAt.current.lerp(_camLookTmp, 0.06);
     camera.lookAt(lookAt.current);
@@ -671,23 +913,69 @@ function CameraRig({ tRef }: { tRef: React.MutableRefObject<number> }) {
 
 /* ---------------- main scene ---------------- */
 
-function Scene({ onComplete }: { onComplete: () => void }) {
+function Scene({
+  onComplete,
+  progress,
+  gammaHistory,
+  infeasible,
+  solverDone,
+}: {
+  onComplete: () => void;
+  progress: ProgressEvent | null;
+  gammaHistory: ProgressEvent[];
+  infeasible: boolean;
+  solverDone: boolean;
+}) {
   const tRef = useRef(0);
   const finished = useRef(false);
+  const failStart = useRef<number | null>(null);
+  const holdClockRef = useRef(0);
+  const holdingRef = useRef(false);
+  const solverDoneRef = useRef(solverDone);
   const [doneText, setDoneText] = useState(false);
+  const [failText, setFailText] = useState(false);
+
+  useEffect(() => {
+    solverDoneRef.current = solverDone;
+  }, [solverDone]);
 
   useFrame((_, dt) => {
-    tRef.current += dt;
-    if (!doneText && tRef.current >= PHASES.done.start) setDoneText(true);
-    if (!finished.current && tRef.current >= TOTAL_DURATION) {
-      finished.current = true;
-      onComplete();
+    // Hold just before the persist phase until the solver resolves.
+    // Once solverDone flips, tRef resumes advancing into persist → respond → done.
+    if (!solverDoneRef.current && tRef.current >= SOLVE_HOLD_T) {
+      tRef.current = SOLVE_HOLD_T;
+      holdClockRef.current += dt;
+      holdingRef.current = true;
+    } else {
+      tRef.current += dt;
+      holdingRef.current = false;
+    }
+
+    // Trigger fail animation as soon as infeasibility is detected.
+    if (infeasible && failStart.current === null) {
+      failStart.current = tRef.current;
+    }
+    if (failStart.current !== null && !failText && tRef.current >= failStart.current + 0.4) {
+      setFailText(true);
+    }
+    if (!doneText && tRef.current >= PHASES.done.start && !infeasible) {
+      setDoneText(true);
+    }
+    if (!finished.current) {
+      // Early completion on infeasibility: ~2.5s fail animation, then back to GUI.
+      if (failStart.current !== null && tRef.current >= failStart.current + 2.5) {
+        finished.current = true;
+        onComplete();
+      } else if (!infeasible && tRef.current >= TOTAL_DURATION) {
+        finished.current = true;
+        onComplete();
+      }
     }
   });
 
   return (
     <>
-      <CameraRig tRef={tRef} />
+      <CameraRig tRef={tRef} holdClockRef={holdClockRef} holdingRef={holdingRef} />
 
       {/* lights */}
       <ambientLight intensity={0.35} />
@@ -708,7 +996,7 @@ function Scene({ onComplete }: { onComplete: () => void }) {
       <ClientNode tRef={tRef} />
       <GatewayNode tRef={tRef} />
       <WorkerPool tRef={tRef} />
-      <SolverCore tRef={tRef} />
+      <SolverCore tRef={tRef} progress={progress} gammaHistory={gammaHistory} infeasible={infeasible} />
       <PostgresNode tRef={tRef} />
 
       {/* connectors */}
@@ -726,6 +1014,20 @@ function Scene({ onComplete }: { onComplete: () => void }) {
         </Text>
       )}
 
+      {failText && (
+        <Text
+          position={[POS.solver.x, POS.solver.y + 4.5, POS.solver.z]}
+          fontSize={0.55}
+          color="#ef4444"
+          anchorX="center"
+          anchorY="middle"
+          outlineWidth={0.02}
+          outlineColor="#7f1d1d"
+        >
+          SYNTHESIS INFEASIBLE
+        </Text>
+      )}
+
       <EffectComposer>
         <Bloom intensity={1.3} luminanceThreshold={0.18} luminanceSmoothing={0.9} mipmapBlur />
       </EffectComposer>
@@ -735,8 +1037,16 @@ function Scene({ onComplete }: { onComplete: () => void }) {
 
 export default function CERNPipeline3D({
   onComplete,
+  progress,
+  gammaHistory,
+  infeasible,
+  solverDone,
 }: {
   onComplete: () => void;
+  progress: ProgressEvent | null;
+  gammaHistory: ProgressEvent[];
+  infeasible: boolean;
+  solverDone: boolean;
 }) {
   return (
     <Canvas
@@ -744,7 +1054,13 @@ export default function CERNPipeline3D({
       camera={{ position: [-12, 5, 14], fov: 42 }}
       style={{ background: "radial-gradient(ellipse at center, #0b0f1a 0%, #05070d 70%)" }}
     >
-      <Scene onComplete={onComplete} />
+      <Scene
+        onComplete={onComplete}
+        progress={progress}
+        gammaHistory={gammaHistory}
+        infeasible={infeasible}
+        solverDone={solverDone}
+      />
     </Canvas>
   );
 }

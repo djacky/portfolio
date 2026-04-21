@@ -96,7 +96,7 @@ const TABS: {
   {
     key: "mpc",
     hash: "demo-mpc",
-    label: "Boost Converter MPC",
+    label: "AC/DC Converter MPC",
     sub: "Eaton · real-time QP",
     icon: CircuitBoard,
     tint: "#f472b6",

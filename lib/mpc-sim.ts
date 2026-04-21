@@ -97,6 +97,14 @@ export const PARAMS = {
   P_REF_MAX: 50_000,               // W    saturation on outer loop
 } as const;
 
+// -------- grid-sag disturbance --------
+// User-held LVRT dip on v_gd: the grid phase-peak drops by GRID_SAG_DEPTH
+// for as long as the toggle is on.  30 % depth is well inside IEEE 1547 /
+// EN 50160 ride-through envelopes so the converter must stay connected,
+// and produces a visibly non-trivial transient on i_gd and V_dc that the
+// outer V_dc loop + inner controller have to arbitrate through E_c.
+const GRID_SAG_DEPTH = 0.3;
+
 // Derived constants
 export const OMEGA = 2 * Math.PI * PARAMS.f_grid;          // rad/s
 export const V_GRID_PEAK = (PARAMS.V_grid_LL_rms * Math.SQRT2) / Math.sqrt(3); // phase-peak
@@ -1224,7 +1232,7 @@ export class MPCEngine {
   private obsPrimed = false;
 
   // -------- disturbance toggles --------
-  public refStepOn = false;
+  public gridSagActive = false;
   public loadStepOn = false;
   public noiseOn = false;
   private noiseSigma_i = 0;       // A   per-axis current noise
@@ -1315,8 +1323,12 @@ export class MPCEngine {
     }
   }
 
-  toggleRefStep(): void {
-    this.refStepOn = !this.refStepOn;
+  /** User-held grid-voltage sag.  Drop v_gd by GRID_SAG_DEPTH while on;
+   *  snap back on toggle off.  Held indefinitely so the operator can watch
+   *  the cascade arbitrate a sustained depressed-grid scenario and judge
+   *  the release edge. */
+  toggleGridSag(): void {
+    this.gridSagActive = !this.gridSagActive;
   }
 
   toggleLoadStep(): void {
@@ -1365,7 +1377,7 @@ export class MPCEngine {
     this.u_d = V_GD;
     this.u_q = 0;
     this.t = 0;
-    this.refStepOn = false;
+    this.gridSagActive = false;
     this.loadStepOn = false;
     this.noiseOn = false;
     this.noiseSigma_i = 0;
@@ -1410,6 +1422,15 @@ export class MPCEngine {
   step(): void {
     const N = this.horizon;
 
+    // ---- 0. Grid voltage seen this tick ----
+    // Computed once and fed through observer predict, MPC solve, PI step,
+    // and plant integration.  The igd_ref conversion below intentionally
+    // uses the *nominal* V_GD so a sag doesn't silently lower the demand —
+    // the story plays out through the power-balance mismatch on E_c and
+    // the controllers catching up.
+    const vGdNow = this.gridSagActive ? V_GD * (1 - GRID_SAG_DEPTH) : V_GD;
+    const vGqNow = V_GQ;
+
     // ---- 1. Outer loop ----
     // In both modes the outer V_dc PI runs.  In PI mode we ALSO add a
     // DC-side load feedforward — without it the outer has to integrate
@@ -1425,13 +1446,10 @@ export class MPCEngine {
       : 0;
     this.P_ref = P_ff + P_trim;
     // Convert P_ref → i_gd*  via amplitude-invariant Park: P = (3/2)·v_gd·i_gd
-    // (we set i_gq* = 0 for unity power factor)
+    // (we set i_gq* = 0 for unity power factor).  Use *nominal* V_GD here
+    // even during a sag, otherwise the reference would chase the disturbance
+    // and mask the transient we're trying to show.
     let igd_ref = (2 / 3) * this.P_ref / V_GD;
-    // Reference step: +25 A additive bump on top of outer loop.  Sized so
-    // that combined with a mid-range EV-demand slider (~30 A) it pushes
-    // i_gd* over the 65 A rail and forces the MPC's i_g_max constraint to
-    // bind — the point of the demo.
-    if (this.refStepOn) igd_ref += 25;
     // Clamp to a generous outer envelope so the outer loop can't ask for the
     // impossible.  The MPC will still enforce the *true* hard rail.
     if (igd_ref > PARAMS.I_G_MAX * 1.6) igd_ref = PARAMS.I_G_MAX * 1.6;
@@ -1467,7 +1485,7 @@ export class MPCEngine {
           Ai[2] * this.xHat[2] + Ai[3] * this.xHat[3] +
           Ai[4] * this.xHat[4] + Ai[5] * this.xHat[5];
         s += Bd[i][0] * this.u_d + Bd[i][1] * this.u_q;
-        s += Ed[i][0] * V_GD + Ed[i][1] * V_GQ;
+        s += Ed[i][0] * vGdNow + Ed[i][1] * vGqNow;
         xp[i] = s;
       }
       // Correct with innovation
@@ -1493,7 +1511,7 @@ export class MPCEngine {
         this.refFuture[k * 2 + 1] = 0;
       }
       const uPrev = new Float64Array([this.u_d, this.u_q]);
-      const sol = this.mpc.solve(xCtrl, uPrev, this.refFuture, V_dc_ctrl);
+      const sol = this.mpc.solve(xCtrl, uPrev, this.refFuture, V_dc_ctrl, [vGdNow, vGqNow]);
       ud = sol.u_d;
       uq = sol.u_q;
 
@@ -1533,7 +1551,7 @@ export class MPCEngine {
       [ud, uq] = this.pi.step(
         xMeas[4], xMeas[5],
         igd_ref, 0,
-        V_GD, V_GQ,
+        vGdNow, vGqNow,
         i_cfd_meas, i_cfq_meas,
         uLim, PARAMS.T_s,
       );
@@ -1553,7 +1571,7 @@ export class MPCEngine {
 
     // ---- 4. Plant integration: T_s of sim, in T_plant sub-steps ----
     const subSteps = Math.max(1, Math.round(PARAMS.T_s / PARAMS.T_plant));
-    for (let s = 0; s < subSteps; s++) this.plant.step(ud, uq);
+    for (let s = 0; s < subSteps; s++) this.plant.step(ud, uq, vGdNow, vGqNow);
 
     // Copy back true state for next-tick measurement.
     this.i_fd_meas = this.plant.x[0];

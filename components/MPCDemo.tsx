@@ -28,7 +28,7 @@ import {
   Pause,
   RotateCcw,
   Zap,
-  TrendingUp,
+  ZapOff,
   Radio,
   Activity,
   Gauge,
@@ -100,8 +100,8 @@ export default function MPCDemo() {
     engineRef.current?.setLoadCurrent(a);
     setTick((n) => n + 1);
   }, []);
-  const onRefStep = useCallback(() => {
-    engineRef.current?.toggleRefStep();
+  const onGridSag = useCallback(() => {
+    engineRef.current?.toggleGridSag();
     setTick((n) => n + 1);
   }, []);
   const onNoise = useCallback(() => {
@@ -260,10 +260,10 @@ export default function MPCDemo() {
 
           <DisturbanceConsole
             carCurrent={engine.i_load}
-            refOn={engine.refStepOn}
+            sagActive={engine.gridSagActive}
             noiseOn={engine.noiseOn}
             onCarCurrent={onCarCurrent}
-            onRef={onRefStep}
+            onSag={onGridSag}
             onNoise={onNoise}
           />
 
@@ -572,19 +572,17 @@ function OptimizerHUD({
 
 function DisturbanceConsole({
   carCurrent,
-  refOn,
+  sagActive,
   noiseOn,
   onCarCurrent,
-  refOnLabel = "Ref step",
-  onRef,
+  onSag,
   onNoise,
 }: {
   carCurrent: number;
-  refOn: boolean;
+  sagActive: boolean;
   noiseOn: boolean;
   onCarCurrent: (a: number) => void;
-  refOnLabel?: string;
-  onRef: () => void;
+  onSag: () => void;
   onNoise: () => void;
 }) {
   return (
@@ -594,11 +592,11 @@ function DisturbanceConsole({
       </div>
       <EVDemandSlider value={carCurrent} onChange={onCarCurrent} />
       <DisturbanceBtn
-        label={refOnLabel}
-        sub="i_gd* +25 A · combine w/ EV demand for rail"
-        icon={<TrendingUp className="w-3.5 h-3.5" />}
-        active={refOn}
-        onClick={onRef}
+        label={sagActive ? "Grid sag · holding" : "Grid sag"}
+        sub="v_gd −30% while held · LVRT ride-through"
+        icon={<ZapOff className="w-3.5 h-3.5" />}
+        active={sagActive}
+        onClick={onSag}
         tint={ACCENT_GOLD}
       />
       <DisturbanceBtn
