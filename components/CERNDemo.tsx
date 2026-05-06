@@ -330,7 +330,7 @@ function SceneGUI({
           sym="ζ"
           value={specs.desZeta}
           unit=""
-          min={0.1}
+          min={0.5}
           max={1.0}
           step={0.05}
           fmt={(v) => v.toFixed(2)}
@@ -352,14 +352,14 @@ function SceneGUI({
         <SpecSlider
           label="Controller order"
           sym="n"
-          value={specs.order ?? 5}
+          value={specs.order ?? 6}
           unit=""
           min={3}
-          max={15}
+          max={10}
           step={1}
           fmt={(v) => `${v}`}
           onChange={(v) => setSpecs({ ...specs, order: Math.round(v) })}
-          hint={`RST · ${(specs.order ?? 5) + 1} coefficients · 1 integrator`}
+          hint={`RST · ${(specs.order ?? 6) + 1} coefficients · 1 integrator`}
         />
 
         <motion.button

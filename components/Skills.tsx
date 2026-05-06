@@ -71,7 +71,7 @@ const GROUPS: Group[] = [
     icon: Cpu,
     title: "Systems & Control",
     tint: "#fbbf24",
-    tagline: "the math and silicon under the ML",
+    tagline: "PhD specialization · decade of published research",
     skills: [
       { name: "Control theory", level: 0.92 },
       { name: "System ID", level: 0.9 },

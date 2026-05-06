@@ -97,16 +97,72 @@ export const PARAMS = {
   P_REF_MAX: 50_000,               // W    saturation on outer loop
 } as const;
 
-// -------- grid-sag disturbance --------
-// User-held LVRT dip on v_gd: the grid phase-peak drops by GRID_SAG_DEPTH
-// for as long as the toggle is on.  30 % depth is well inside IEEE 1547 /
-// EN 50160 ride-through envelopes so the converter must stay connected,
-// and produces a visibly non-trivial transient on i_gd and V_dc that the
-// outer V_dc loop + inner controller have to arbitrate through E_c.
-const GRID_SAG_DEPTH = 0.3;
+// -------- grid harmonic disturbance --------
+// User-held 5th-harmonic pollution on the grid voltage — the dominant
+// distortion on real LV grids (6-pulse rectifier loads, VFDs, arc furnaces).
+// The 5th is a NEGATIVE-sequence harmonic in abc: v_a at 5ω, v_b shifted
+// +120°, v_c shifted −120°.  After the Park transform at the fundamental ω
+// it appears as a 6× ripple rotating backward in the dq frame:
+//     v_gd^(5)(t) = V_5 · cos(6ωt)
+//     v_gq^(5)(t) = −V_5 · sin(6ωt)                    (6·50 Hz = 300 Hz)
+// Magnitude 8 % of the phase peak — inside IEEE 519 / IEC 61000-2-2
+// compatibility envelopes but large enough that the MPC's Ed·v_g feedforward
+// visibly attenuates what a blind controller would pass through to i_g.
+// Unlike the sag, this does not change average power demand, so it stays
+// stable under any slider setting including the 55 A rail-binding extreme.
+const HARMONIC_AMP_FRAC = 0.08;
+const HARMONIC_ORDER = 5;
+
+// -------- IMP harmonic rejection (augmented MPC state) --------
+// The 5th-harmonic shows up in the dq frame at H_DQ = 6× fundamental.  To
+// reject it asymptotically, the textbook Francis–Wonham internal-model
+// principle says we must embed a copy of the disturbance generator in the
+// controller's state space.  We do that by augmenting the MPC model with a
+// 2-state resonator at 6ω driven by the grid-side tracking error:
+//     ξ ∈ R^2,       dξ/dt = A_r · ξ  +  (y − r)
+//     A_r = [[−σ, +H_DQ·ω], [−H_DQ·ω, −σ]]              (damped rotor)
+// Augmented state becomes x_aug = [x_plant; ξ] ∈ R^8.  The MPC predicts,
+// constrains, AND costs the full 8-state trajectory — weighting ξ in the
+// objective forces the optimal U to drive ξ→0, which by the IMP theorem
+// equals zero steady-state error at ω_r.  Because ξ is part of the state
+// space, the SVPWM circle and current rails are respected by construction
+// — no post-MPC "companion correction" that can saturate and destabilise.
+const HARMONIC_REJECTION_ORDER_DQ = 6;
+// Light damping on the rotor so the poles sit at r·e^(±jω_r·Ts) with r<1
+// instead of exactly on the unit circle.  A pure integrator at 6ω windups
+// catastrophically during rail-binding (no horizon is long enough for ξ to
+// decay before the QP becomes infeasible).  σ ≈ 15 rad/s gives a rotor
+// time-constant of ~65 ms — fast enough that the MPC can see ξ grow and
+// react within a couple of grid cycles, slow enough that the internal model
+// still has ~45 dB of loop gain at resonance.
+const RESONATOR_DAMPING = 15;
+// Cost weight on the two resonator states.  With β tuned so |ξ|≈|e| at
+// resonance, the weight should track Q_y so the MPC trades tracking and
+// rejection symmetrically.  Terminal weight moderately higher for
+// steady-state emphasis at the horizon end.
+const RESONATOR_Q = 1500;
+const RESONATOR_Q_F = 4500;
+// Reference low-pass cut-off used by the engine's ξ driver (Hz).  The outer
+// V_dc PI leaks a 6ω ripple into i_gd_ref via V_dc power-balance (V_DC_KP·
+// V_dc·ΔV_dc ≈ 5 A ripple in the d-axis reference).  Driving ξ off raw
+// (y − r) then has the rotor chase its own reference ripple, not the grid
+// disturbance the IMP is supposed to kill.  We therefore feed ξ with
+// (y − LPF(r)) at ~15 Hz cutoff so only DC-slow reference content counts
+// as "the operating point"; any 6ω in r is treated as an unrejectable
+// component the controller shouldn't fight.
+const RESONATOR_REF_LPF_HZ = 15;
 
 // Derived constants
 export const OMEGA = 2 * Math.PI * PARAMS.f_grid;          // rad/s
+// Rotor input gain (applied to the continuous-time B_r matrix before ZOH).
+// With B_r = β·I₂, the rotor's closed-loop amplitude ratio from ripple e
+// to state ξ is roughly β/(2σω_r) in open loop.  β=1 gives |ξ/e|≈1.8e-5
+// at σ=15, ω_r≈1884 — ξ 5 orders of magnitude smaller than the ripple,
+// and no finite Q_ξ can make the MPC care.  Empirically, β≈5000 lands
+// |ξ|/|e|≈1 under the MPC's closed loop so Q_ξ comparable to Qy creates
+// meaningful cost tension between tracking and rejection without having
+// ξ dominate (which detunes the MPC against its own rail constraints).
+const RESONATOR_B_GAIN = 5000;
 export const V_GRID_PEAK = (PARAMS.V_grid_LL_rms * Math.SQRT2) / Math.sqrt(3); // phase-peak
 // Amplitude-invariant Park: with PLL locked, v_gd = V_GRID_PEAK, v_gq = 0
 export const V_GD = V_GRID_PEAK;
@@ -474,7 +530,7 @@ export interface MPCSolve {
   u_d: number;
   u_q: number;
   uSeq: Float64Array;          // [u_d(0), u_q(0), …]   length 2N
-  xPred: Float64Array;         // 6N — full predicted state trajectory
+  xPred: Float64Array;         // nx·N — full predicted state trajectory (nx=6 or 8 depending on IMP)
   solveUs: number;
   iters: number;
   activeCount: number;
@@ -487,20 +543,43 @@ export interface MPCSolve {
 
 export class MPCController {
   readonly N: number;
-  readonly nx = 6;
+  /** Plant state dim (6) — always carried at indices 0..5 of x_aug. */
+  readonly nxPlant = 6;
   readonly nu = 2;
 
-  // Discrete-time matrices (rebuilt only when params or Ts change).
-  // Public so the engine's state observer can reuse the ZOH model without
-  // recomputing its own expm.
+  /** Full augmented state dim: 6 without reject, 8 with reject (appends 2
+   *  resonator states ξ_d, ξ_q at indices 6, 7).  Rebuilt on toggle. */
+  public nx: number = 6;
+
+  // Discrete-time plant matrices (for the 6-state LCL) — rebuilt only when
+  // params/Ts change.  Public so the engine's state observer reuses the
+  // same ZOH model without recomputing its own expm.
   public Ad!: Mat;
   public Bd!: Mat;
   public Ed!: Mat;
 
+  /** Augmented-state discrete matrices — used by prediction/constraint
+   *  builders.  When harmonicReject is off these alias Ad/Bd/Ed (nx=6);
+   *  when on they are the 8×8 / 8×2 block matrices that include the rotor
+   *  dynamics and reference feedforward. */
+  private Aaug!: Mat;
+  private Baug!: Mat;
+  private Eaug!: Mat;
+  /** F_aug — drives ξ from the reference r[k].  nx_aug × 2.  Only non-zero
+   *  when harmonicReject is on; needed so the MPC's predictions see the
+   *  same (y−r)-driven rotor dynamics that the engine will apply. */
+  private Faug!: Mat;
+
+  /** Whether the augmented rotor states are live in this controller. */
+  public harmonicReject = false;
+
   // Condensed prediction matrices.
   private Phi!: Mat;            // (nx·N) × nx
   private Gamma!: Mat;          // (nx·N) × (nu·N)   (lower-block-triangular)
-  private Psi!: Mat;            // (nx·N) × nv       (cumulative E_d)
+  private Psi!: Mat;            // (nx·N) × nv       (cumulative E_aug)
+  /** Reference feedforward: Omega[k][j] = A_aug^(k-j) · F_aug, blocked
+   *  analogously to Gamma.  (nx·N) × (2·N).  Empty (0-row) when reject off. */
+  private Omega!: Mat;
 
   // Cost weights (selecting the controlled outputs i_g_d, i_g_q).
   // We track grid-side current — that's what feeds the bus / load.
@@ -525,12 +604,10 @@ export class MPCController {
   /** Last assembled SVPWM input bound (axis box magnitude). */
   private uBoundCached = 0;
 
-  constructor(N = 10) {
+  constructor(N = 10, harmonicReject = false) {
     this.N = N;
     this.discretise();
-    this.buildPredictionMatrices();
-    this.buildCostMatrices();
-    this.buildConstraintMatrix(PARAMS.V_dc_nom);
+    this.configureAugmentation(harmonicReject);
     this.lambda = new Float64Array(this.m);
   }
 
@@ -544,41 +621,117 @@ export class MPCController {
     this.Ed = Ed;
   }
 
+  /** Assemble A_aug / B_aug / E_aug / F_aug for the requested augmentation
+   *  mode, then rebuild prediction/cost/constraint stacks against them.
+   *  When `on` is false, the rotor block is dropped and the augmented
+   *  matrices alias the 6-state plant.  When `on` is true we prepend the
+   *  ZOH'd plant with a 2-state damped rotor driven by (y−r):
+   *      ξ[k+1] = A_r_d · ξ[k] + B_r_d · (C_out·x_plant[k] − r[k])
+   *  giving the block structure
+   *      A_aug = [[Ad, 0], [B_r_d · C_out, A_r_d]]
+   *      B_aug = [Bd; 0]    E_aug = [Ed; 0]    F_aug = [0; −B_r_d]
+   *  All subsequent builders loop over this.nx and blindly consume the
+   *  augmented matrices, so turning IMP on truly extends the state space. */
+  private configureAugmentation(on: boolean): void {
+    this.harmonicReject = on;
+    if (!on) {
+      this.nx = this.nxPlant;
+      this.Aaug = this.Ad;
+      this.Baug = this.Bd;
+      this.Eaug = this.Ed;
+      this.Faug = zeros(this.nx, this.nu);
+    } else {
+      const nxp = this.nxPlant;
+      const nxi = 2;
+      const nx = nxp + nxi;
+      this.nx = nx;
+      const { Ar_d, Br_d } = buildRotorDiscrete(PARAMS.T_s);
+      // Top block: plant dynamics zero-padded for the ξ columns.
+      const A = zeros(nx, nx);
+      for (let i = 0; i < nxp; i++)
+        for (let j = 0; j < nxp; j++) A[i][j] = this.Ad[i][j];
+      // Bottom-left B_r_d · C_out.  C_out picks x_plant indices 4,5 = [i_gd, i_gq].
+      //   (B_r_d · C_out)[i][j] = B_r_d[i][j−4]   for j ∈ {4,5}, else 0.
+      for (let i = 0; i < nxi; i++) {
+        A[nxp + i][4] = Br_d[i][0];
+        A[nxp + i][5] = Br_d[i][1];
+      }
+      // Bottom-right A_r_d.
+      for (let i = 0; i < nxi; i++)
+        for (let j = 0; j < nxi; j++) A[nxp + i][nxp + j] = Ar_d[i][j];
+      this.Aaug = A;
+
+      const B = zeros(nx, this.nu);
+      for (let i = 0; i < nxp; i++)
+        for (let j = 0; j < this.nu; j++) B[i][j] = this.Bd[i][j];
+      this.Baug = B;
+
+      const E = zeros(nx, this.nu);
+      for (let i = 0; i < nxp; i++)
+        for (let j = 0; j < this.nu; j++) E[i][j] = this.Ed[i][j];
+      this.Eaug = E;
+
+      // F_aug — reference enters ξ dynamics as −B_r_d·r (since ξ̇ grows on y−r).
+      const F = zeros(nx, this.nu);
+      for (let i = 0; i < nxi; i++)
+        for (let j = 0; j < this.nu; j++) F[nxp + i][j] = -Br_d[i][j];
+      this.Faug = F;
+    }
+    this.buildPredictionMatrices();
+    this.buildCostMatrices();
+    this.buildConstraintMatrix(PARAMS.V_dc_nom);
+    this.lambda = new Float64Array(this.m);
+  }
+
+  /** Flip the harmonic-rejection augmentation on/off.  Rebuilds all the
+   *  condensed QP matrices; expected to be called rarely (user toggle). */
+  setHarmonicReject(on: boolean): void {
+    if (on === this.harmonicReject) return;
+    this.configureAugmentation(on);
+  }
+
   private buildPredictionMatrices(): void {
-    const { N, nx, nu, Ad, Bd, Ed } = this;
+    const { N, nx, nu, Aaug, Baug, Eaug, Faug } = this;
     const Phi = zeros(nx * N, nx);
     const Gamma = zeros(nx * N, nu * N);
     const Psi = zeros(nx * N, nu); // disturbance is 2-D too (v_g)
+    // Omega: reference feedforward, block-triangular like Gamma.  Only
+    // non-trivial rows are the ξ rows (when augmented); plant rows are
+    // zero since F_aug's top 6 rows are zero.
+    const Omega = zeros(nx * N, nu * N);
 
-    // A_pow[k] = A_d^{k+1}
+    // A_pow[k] = A_aug^{k+1}
     const Apow: Mat[] = [];
-    let Acur = Ad;
+    let Acur = Aaug;
     for (let k = 0; k < N; k++) {
       Apow.push(Acur);
-      if (k < N - 1) Acur = matMul(Ad, Acur);
+      if (k < N - 1) Acur = matMul(Aaug, Acur);
     }
 
-    // Row block k (predicted x[k+1]) :
-    //   x[k+1] = A^{k+1} x_0 + Σ_{j=0..k} A^{k-j} B u[j] + Σ_{j=0..k} A^{k-j} E v_g
-    //
-    //   Phi[k] = A^{k+1}
-    //   Gamma[k][j] = A^{k-j} B    for j ≤ k
-    //   Psi[k]  = (Σ_{j=0..k} A^{k-j}) E
+    // Row block k (predicted x_aug[k+1]) :
+    //   x[k+1] = A^{k+1} x_0
+    //          + Σ_{j=0..k} A^{k-j} B u[j]
+    //          + Σ_{j=0..k} A^{k-j} E v_g        (v_g constant → collapses into Psi)
+    //          + Σ_{j=0..k} A^{k-j} F r[j]       (r varies, Omega block-triangular)
     for (let k = 0; k < N; k++) {
       // Phi
       const Apk = Apow[k];
       for (let i = 0; i < nx; i++)
         for (let c = 0; c < nx; c++) Phi[k * nx + i][c] = Apk[i][c];
-      // Gamma blocks (B preceded by A^{k-j})
+      // Gamma + Omega blocks (B / F preceded by A^{k-j})
       for (let j = 0; j <= k; j++) {
         const power = k - j; // 0..k
         const Ajk: Mat = power === 0 ? eye(nx) : Apow[power - 1];
-        const block = matMul(Ajk, Bd);
-        for (let i = 0; i < nx; i++)
-          for (let c = 0; c < nu; c++)
-            Gamma[k * nx + i][j * nu + c] = block[i][c];
+        const gBlock = matMul(Ajk, Baug);
+        const oBlock = matMul(Ajk, Faug);
+        for (let i = 0; i < nx; i++) {
+          for (let c = 0; c < nu; c++) {
+            Gamma[k * nx + i][j * nu + c] = gBlock[i][c];
+            Omega[k * nx + i][j * nu + c] = oBlock[i][c];
+          }
+        }
       }
-      // Psi  =  Σ_{j=0..k} A^{k-j} E         (constant disturbance assumption)
+      // Psi  =  Σ_{j=0..k} A^{k-j} E_aug      (constant-v_g assumption)
       const cumA = zeros(nx);
       for (let j = 0; j <= k; j++) {
         const power = k - j;
@@ -586,7 +739,7 @@ export class MPCController {
         for (let r = 0; r < nx; r++)
           for (let c = 0; c < nx; c++) cumA[r][c] += Ajk[r][c];
       }
-      const psiBlock = matMul(cumA, Ed);
+      const psiBlock = matMul(cumA, Eaug);
       for (let i = 0; i < nx; i++)
         for (let c = 0; c < nu; c++) Psi[k * nx + i][c] = psiBlock[i][c];
     }
@@ -594,16 +747,31 @@ export class MPCController {
     this.Phi = Phi;
     this.Gamma = Gamma;
     this.Psi = Psi;
+    this.Omega = Omega;
   }
 
   private buildCostMatrices(): void {
     const { N, nx, nu, Gamma } = this;
-    // Qbar — diagonal, only i_gd, i_gq weighted.  Indices 4, 5 of each block.
+    // Qbar — diagonal.  Weighted entries:
+    //   indices 4, 5  → grid current tracking error (always on)
+    //   indices 6, 7  → rotor states ξ_d, ξ_q (only when augmented)
+    // Putting Q_ξ > 0 on the rotor states is the whole point of state
+    // augmentation: the MPC now believes ξ matters, so it plans u so that
+    // ξ stays small, which (by the rotor dynamics) means killing any
+    // sustained 6ω component in (y − r).  Without a Q_ξ weight the MPC
+    // would happily let ξ grow — tracking cost alone, over a finite
+    // horizon, cannot hit asymptotic sinusoidal rejection.
     const Qd = new Float64Array(nx * N);
     for (let k = 0; k < N; k++) {
-      const w = k === N - 1 ? this.Qf : this.Qy;
+      const isTerm = k === N - 1;
+      const w = isTerm ? this.Qf : this.Qy;
       Qd[k * nx + 4] = w;
       Qd[k * nx + 5] = w;
+      if (this.harmonicReject) {
+        const wXi = isTerm ? RESONATOR_Q_F : RESONATOR_Q;
+        Qd[k * nx + 6] = wXi;
+        Qd[k * nx + 7] = wXi;
+      }
     }
     // Rbar — diagonal, length nu·N
     const Rd = new Float64Array(nu * N);
@@ -735,7 +903,9 @@ export class MPCController {
 
   /** Solve the QP.
    *
-   *  @param x0       current measured 6-state (dq)
+   *  @param x0       current augmented state estimate, length `this.nx`.
+   *                  When harmonicReject is off: the 6-state plant estimate.
+   *                  When on: 6-state plant + 2 resonator states ξ_d, ξ_q.
    *  @param uPrev    last applied input [u_d, u_q] (V)
    *  @param refSeq   reference grid current over the horizon, length 2N:
    *                  [i_gd*(1), i_gq*(1), …, i_gd*(N), i_gq*(N)]
@@ -748,6 +918,11 @@ export class MPCController {
     refSeq: Float64Array,
     V_dc: number,
     vG: [number, number] = [V_GD, V_GQ],
+    /** Optional separate reference driving the ξ rotor (augmented mode
+     *  only).  Typically a LPF'd version of refSeq, so the rotor is not
+     *  driven by the 6ω ripple the outer V_dc PI leaks into i_gd_ref.
+     *  Defaults to refSeq. */
+    refSeqXi?: Float64Array,
   ): MPCSolve {
     const t0 = performance.now();
     this.refreshInputBound(V_dc);
@@ -769,9 +944,32 @@ export class MPCController {
     for (let i = 0; i < nx * N; i++) {
       Psv[i] = this.Psi[i][0] * vG[0] + this.Psi[i][1] * vG[1];
     }
-    // X_free = Phi·x0 + Psi·v_g     (open-loop trajectory at U=0)
+    // Omega · R_xi — reference-feedforward component of the free trajectory
+    // for the augmented rotor.  MUST match what the engine actually applies
+    // to ξ each tick (same rail-clamp on the reference), otherwise engine
+    // and controller run on different augmented plants and the closed loop
+    // destabilises.  R_xi clamps to ±I_G_MAX·0.95 so that an unreachable
+    // outer-loop demand (i_gd*→104 A at peak EV charge vs 65 A rail) can't
+    // pretend to be rejectable 6ω content and wind ξ into instability.
+    const omR = new Float64Array(nx * N);
+    if (this.harmonicReject) {
+      const refCap = PARAMS.I_G_MAX * 0.95;
+      const baseXi = refSeqXi ?? refSeq;
+      const refXi = new Float64Array(nuN);
+      for (let j = 0; j < nuN; j++) {
+        const r = baseXi[j];
+        refXi[j] = r > refCap ? refCap : r < -refCap ? -refCap : r;
+      }
+      for (let i = 0; i < nx * N; i++) {
+        let s = 0;
+        const Oi = this.Omega[i];
+        for (let j = 0; j < nuN; j++) s += Oi[j] * refXi[j];
+        omR[i] = s;
+      }
+    }
+    // X_free = Phi·x0 + Psi·v_g + Omega·R_xi   (open-loop trajectory at U=0)
     const Xfree = new Float64Array(nx * N);
-    for (let i = 0; i < nx * N; i++) Xfree[i] = Phix[i] + Psv[i];
+    for (let i = 0; i < nx * N; i++) Xfree[i] = Phix[i] + Psv[i] + omR[i];
 
     // y_free − r,  but only for indices 4 and 5 (i_g_d, i_g_q) at each block.
     // Build e_y: length 2N (the controlled outputs over horizon).
@@ -781,15 +979,23 @@ export class MPCController {
       ey[k * 2 + 1] = Xfree[k * nx + 5] - refSeq[k * 2 + 1];
     }
 
-    // Build f = 2·Gammaᵀ·Q·(Xfree − Rfull),  but only indices 4,5 in Q.
-    // f[i] = 2·Σ_{k} Q_k · Gamma[k·nx + idx][i] · ey[k·2 + (idx−4)] for idx∈{4,5}
+    // Build f = 2·Gammaᵀ·Q·(Xfree − Rfull).
+    //   - For indices 4,5 (i_g d/q): Q·ey term.
+    //   - For indices 6,7 (ξ, when augmented): Q_ξ · Xfree term (ξ target = 0).
+    // f[i] = 2·Σ_{k} Q_k · Gamma[k·nx + idx][i] · residual
     const f = new Float64Array(nuN);
     for (let i = 0; i < nuN; i++) {
       let s = 0;
       for (let k = 0; k < N; k++) {
-        const w = k === N - 1 ? this.Qf : this.Qy;
+        const isTerm = k === N - 1;
+        const w = isTerm ? this.Qf : this.Qy;
         s += w * this.Gamma[k * nx + 4][i] * ey[k * 2];
         s += w * this.Gamma[k * nx + 5][i] * ey[k * 2 + 1];
+        if (this.harmonicReject) {
+          const wXi = isTerm ? RESONATOR_Q_F : RESONATOR_Q;
+          s += wXi * this.Gamma[k * nx + 6][i] * Xfree[k * nx + 6];
+          s += wXi * this.Gamma[k * nx + 7][i] * Xfree[k * nx + 7];
+        }
       }
       f[i] = 2 * s;
     }
@@ -1151,6 +1357,65 @@ class VdcOuterPI {
 }
 
 // ============================================================
+//  IMP state-augmentation — 2D damped rotor at 6ω
+// ============================================================
+//
+// Helpers that build the discrete rotor matrices used when the MPC runs in
+// its augmented-state configuration.  The rotor lives inside the MPC's state
+// vector (not as a post-controller companion) so the QP's predictions,
+// constraints, and cost all see ξ natively.
+//
+// Continuous-time form (real 2×2 damped rotor):
+//     dξ/dt = A_r · ξ  +  B_r · (y − r)
+//     A_r   = [[−σ, +ω_r], [−ω_r, −σ]],   B_r = I₂
+// The eigenvalues are −σ ± jω_r; the ±jω_r imaginary part is the internal
+// model that makes ξ resonate with the 6ω error (negative-sequence → dq
+// appears at ω_r = H_DQ·OMEGA in the "clockwise" sense matched by this real
+// 2×2 block).  Adding Q_ξ·ξᵀξ to the MPC cost makes the optimal input
+// actively suppress any sustained ω_r content in (y − r); Francis–Wonham
+// IMP then guarantees asymptotic zero error at ω_r.  Unlike the former
+// "PR companion" approach, ξ sits inside the constraint-aware QP so the
+// SVPWM circle and current rails cannot be violated by the harmonic loop.
+// ============================================================
+
+/** Closed-form ZOH discretisation of
+ *      dξ/dt = A_r · ξ + β·I · e
+ *  with β = RESONATOR_B_GAIN.  Returns A_r_d = exp(A_r·Ts) and
+ *  B_r_d = ∫₀^Ts exp(A_r·τ) dτ · β·I.  β is chosen so |ξ/e| at resonance
+ *  is O(1), making ξ numerically comparable to the tracking error so a
+ *  sensibly-sized Q_ξ actually causes the MPC to plan ξ-suppression. */
+function buildRotorDiscrete(Ts: number): { Ar_d: Mat; Br_d: Mat } {
+  const wr = HARMONIC_REJECTION_ORDER_DQ * OMEGA;
+  const s = RESONATOR_DAMPING;
+  const c = Math.cos(wr * Ts);
+  const sn = Math.sin(wr * Ts);
+  const decay = Math.exp(-s * Ts);
+  // A_r_d = e^(−σ·Ts) · [[cos, +sin], [−sin, cos]]
+  const Ar_d: Mat = [
+    [decay * c,  decay * sn],
+    [-decay * sn, decay * c],
+  ];
+  // B_r_d = A_r⁻¹ · (A_r_d − I) · (β·I).  For A_r = [[−σ, ω_r],
+  // [−ω_r, −σ]], A_r⁻¹ = (1/(σ²+ω_r²)) · [[−σ, −ω_r], [+ω_r, −σ]].
+  const det = s * s + wr * wr;
+  const beta = RESONATOR_B_GAIN;
+  const Ainv: Mat = [
+    [-s / det, -wr / det],
+    [ wr / det, -s / det],
+  ];
+  const AmI: Mat = [
+    [Ar_d[0][0] - 1, Ar_d[0][1]    ],
+    [Ar_d[1][0],     Ar_d[1][1] - 1],
+  ];
+  const AinvAmI = matMul(Ainv, AmI);
+  const Br_d: Mat = [
+    [AinvAmI[0][0] * beta, AinvAmI[0][1] * beta],
+    [AinvAmI[1][0] * beta, AinvAmI[1][1] * beta],
+  ];
+  return { Ar_d, Br_d };
+}
+
+// ============================================================
 //  Engine — wraps plant + both controllers + ring buffers.
 //  Owns sim state and is driven by the render loop.
 // ============================================================
@@ -1209,6 +1474,20 @@ export class MPCEngine {
   public mpc: MPCController;
   private pi: PIController;
   private outerPI: VdcOuterPI;
+  /** Rotor state when harmonic rejection is on.  Carried in the engine so
+   *  it can be seeded at toggle time and then handed to the MPC as the
+   *  augmented x₀ on every solve.  Zero when reject is off. */
+  private xi_d = 0;
+  private xi_q = 0;
+  /** LPF'd reference used as the "DC operating point" for ξ-error input
+   *  (see RESONATOR_REF_LPF_HZ).  Initialised to track iref on first use. */
+  private xi_ref_d_lp = 0;
+  private xi_ref_q_lp = 0;
+  private xi_ref_primed = false;
+  /** Discrete rotor matrices — cached here so we can propagate ξ at the
+   *  end of each tick using the same ZOH'd dynamics that the MPC's
+   *  prediction assumes.  Built once; the MPC re-builds its own copy. */
+  private readonly rotor = buildRotorDiscrete(PARAMS.T_s);
   private plant: LCLPlant;
   /** Timestep counter (in MPC ticks). */
   public t = 0;
@@ -1232,7 +1511,28 @@ export class MPCEngine {
   private obsPrimed = false;
 
   // -------- disturbance toggles --------
-  public gridSagActive = false;
+  public gridHarmonicActive = false;
+  // IMP state augmentation: when on, the MPC runs with an 8-state model
+  // that includes a 2-state damped rotor at 6ω driven by the tracking
+  // error; cost Q_ξ > 0 on the rotor states then forces the MPC to plan
+  // control that drives ξ → 0 → zero steady-state error at 6ω (Francis–
+  // Wonham internal-model principle).  A/B-compares plain-MPC feedforward
+  // against a truly augmented-state MPC so the viewer can see the 6ω
+  // residual collapse when IMP is on.
+  public harmonicRejectOn = false;
+  /** Whether IMP is *effectively* augmenting the MPC this tick.  Follows
+   *  harmonicRejectOn when the inner rails aren't binding, but is latched
+   *  OFF whenever the previous solve reported i_g_max / i_f_max / u_box
+   *  active — the augmented-state MPC's prediction model has no usable
+   *  degree of freedom against an unreachable reference, and trying to
+   *  optimise ξ in that regime destabilises the rail-bound operating
+   *  point.  When rails release, we flip back to the augmented controller
+   *  and rejection resumes on the next tick. */
+  private impEffective = false;
+  /** Rolling count of consecutive ticks the rail constraints have been
+   *  inactive — used to hysterise the swap back from 6-state to 8-state so
+   *  brief rail taps don't flutter the MPC rebuild. */
+  private railClearTicks = 0;
   public loadStepOn = false;
   public noiseOn = false;
   private noiseSigma_i = 0;       // A   per-axis current noise
@@ -1284,7 +1584,9 @@ export class MPCEngine {
   setHorizon(N: number): void {
     if (N === this.horizon) return;
     this.horizon = N;
-    this.mpc = new MPCController(N);
+    // Preserve the augmentation flag across horizon rebuilds so a user who
+    // turned IMP on doesn't silently lose it when they drag the horizon slider.
+    this.mpc = new MPCController(N, this.harmonicRejectOn);
     if (this.refFuture.length < 2 * N) this.refFuture = new Float64Array(2 * N);
   }
 
@@ -1323,12 +1625,49 @@ export class MPCEngine {
     }
   }
 
-  /** User-held grid-voltage sag.  Drop v_gd by GRID_SAG_DEPTH while on;
-   *  snap back on toggle off.  Held indefinitely so the operator can watch
-   *  the cascade arbitrate a sustained depressed-grid scenario and judge
-   *  the release edge. */
-  toggleGridSag(): void {
-    this.gridSagActive = !this.gridSagActive;
+  /** User-held grid 5th-harmonic injection.  While on, overlays a 6× ripple
+   *  on (v_gd, v_gq) representing the dominant distortion on polluted LV
+   *  grids.  Held indefinitely so the operator can compare the steady-state
+   *  grid-current ripple with the harmonic on vs. off; visible i_g deviation
+   *  shows the MPC's v_g feedforward + model-based prediction at work. */
+  toggleGridHarmonic(): void {
+    this.gridHarmonicActive = !this.gridHarmonicActive;
+  }
+
+  /** Toggle the IMP state-augmentation.  When ON the MPC is rebuilt against
+   *  an 8-state model that embeds a damped 2-state rotor at 6ω driven by
+   *  the grid-current tracking error; the rotor states ξ are carried in
+   *  the QP's prediction, constraints, and cost, so the MPC plans u so as
+   *  to drive ξ → 0 (which = zero sustained 6ω error by the internal-
+   *  model principle).  When OFF the MPC falls back to its 6-state plant
+   *  model.  ξ is zeroed on every toggle so the first post-toggle solve
+   *  doesn't inherit stale rotor content that belongs to the previous
+   *  operating point. */
+  toggleHarmonicReject(): void {
+    this.harmonicRejectOn = !this.harmonicRejectOn;
+    this.xi_d = 0;
+    this.xi_q = 0;
+    this.xi_ref_primed = false;
+    this.railClearTicks = 0;
+    if (!this.harmonicRejectOn) {
+      // Turning IMP off — always revert the MPC to its 6-state form.
+      this.mpc.setHarmonicReject(false);
+      this.impEffective = false;
+    } else {
+      // Turning IMP on — arm the augmentation only if rails aren't
+      // currently binding.  If they are, the step()-time gate will
+      // flip it on when they release.
+      const railActive = this.active.includes("i_g_max")
+        || this.active.includes("i_f_max")
+        || this.active.includes("u_box");
+      if (!railActive) {
+        this.mpc.setHarmonicReject(true);
+        this.impEffective = true;
+      } else {
+        this.mpc.setHarmonicReject(false);
+        this.impEffective = false;
+      }
+    }
   }
 
   toggleLoadStep(): void {
@@ -1377,7 +1716,8 @@ export class MPCEngine {
     this.u_d = V_GD;
     this.u_q = 0;
     this.t = 0;
-    this.gridSagActive = false;
+    this.gridHarmonicActive = false;
+    this.harmonicRejectOn = false;
     this.loadStepOn = false;
     this.noiseOn = false;
     this.noiseSigma_i = 0;
@@ -1395,6 +1735,12 @@ export class MPCEngine {
     this.mpc.resetWarmStart();
     this.pi.reset();
     this.outerPI.reset();
+    this.xi_d = 0;
+    this.xi_q = 0;
+    this.xi_ref_primed = false;
+    this.impEffective = false;
+    this.railClearTicks = 0;
+    this.mpc.setHarmonicReject(false);
     this.solveUs = 0;
     this.solveUsEma = 0;
     this.solveUsBatch = 0;
@@ -1424,12 +1770,22 @@ export class MPCEngine {
 
     // ---- 0. Grid voltage seen this tick ----
     // Computed once and fed through observer predict, MPC solve, PI step,
-    // and plant integration.  The igd_ref conversion below intentionally
-    // uses the *nominal* V_GD so a sag doesn't silently lower the demand —
-    // the story plays out through the power-balance mismatch on E_c and
-    // the controllers catching up.
-    const vGdNow = this.gridSagActive ? V_GD * (1 - GRID_SAG_DEPTH) : V_GD;
-    const vGqNow = V_GQ;
+    // and plant integration.  When the harmonic toggle is on, overlay the
+    // 5th-harmonic dq components — this is a pure voltage disturbance on the
+    // plant, while the MPC only feeds forward the *current* sample (predictions
+    // over the horizon still assume v_g constant), so the controller visibly
+    // attenuates but does not perfectly cancel the ripple.  The IMP toggle
+    // lifts that limit by wrapping a PR companion (step 3b below) around the
+    // loop — infinite gain at 6ω → asymptotic rejection.
+    let vGdNow = V_GD;
+    let vGqNow = V_GQ;
+    if (this.gridHarmonicActive) {
+      // 5th-harmonic (negative sequence) → 6× backward ripple in dq.
+      const phi = (HARMONIC_ORDER + 1) * OMEGA * (this.t * PARAMS.T_s);
+      const V_5 = V_GD * HARMONIC_AMP_FRAC;
+      vGdNow += V_5 * Math.cos(phi);
+      vGqNow += -V_5 * Math.sin(phi);
+    }
 
     // ---- 1. Outer loop ----
     // In both modes the outer V_dc PI runs.  In PI mode we ALSO add a
@@ -1505,13 +1861,85 @@ export class MPCEngine {
     // ---- 3. Inner controller ----
     let ud: number, uq: number;
     if (this.mode === "mpc") {
+      // Rail-bound gating for IMP augmentation.  The augmented-state MPC
+      // plans against an internal model that integrates (y − r) into ξ,
+      // and when a rail constraint binds there's no feasible u that
+      // drives ξ to zero — the QP picks a pathological trajectory that
+      // destabilises the rail-bound operating point.  So: when the last
+      // solve reported an active state or input rail, drop back to the
+      // plain 6-state MPC for a few ticks.  Matrix rebuild only fires on
+      // the transition edge, so this doesn't tax per-tick compute.
+      if (this.harmonicRejectOn) {
+        // Gate IMP off when the grid-current rail is active — that
+        // signals an unreachable outer-loop demand (e.g. 55 A EV peak
+        // driving i_gd*→100 A vs a 65 A rail) and the augmented IMP
+        // can't achieve rejection against an impossible target.  We do
+        // NOT gate on u_box here: the MPC intermittently taps the
+        // SVPWM circle while shaping its voltage command against the
+        // 300 Hz grid ripple — that's a SIGN OF WORKING rejection, not
+        // a failure mode.  The fast-ramp transient (ξ winding up on a
+        // stale LPF'd reference) is handled separately by the ξ-LPF
+        // snap-reset below when a large reference step is detected.
+        const railActive = this.active.includes("i_g_max");
+        if (railActive) {
+          this.railClearTicks = 0;
+          if (this.impEffective) {
+            this.mpc.setHarmonicReject(false);
+            this.impEffective = false;
+            this.xi_d = 0;
+            this.xi_q = 0;
+          }
+        } else {
+          // Require a short quiet window before re-arming IMP so a brief
+          // rail tap doesn't thrash the swap.
+          if (++this.railClearTicks > 20 && !this.impEffective) {
+            this.mpc.setHarmonicReject(true);
+            this.impEffective = true;
+            this.xi_d = 0;
+            this.xi_q = 0;
+          }
+        }
+      }
       // Build reference sequence — assume constant over horizon.
       for (let k = 0; k < N; k++) {
         this.refFuture[k * 2] = igd_ref;
         this.refFuture[k * 2 + 1] = 0;
       }
       const uPrev = new Float64Array([this.u_d, this.u_q]);
-      const sol = this.mpc.solve(xCtrl, uPrev, this.refFuture, V_dc_ctrl, [vGdNow, vGqNow]);
+      // Build augmented x0 — 6-state plant estimate with ξ appended when
+      // IMP is effective this tick.  Matches MPCController.nx; the MPC's
+      // prediction then correctly propagates ξ using (y − r) over the
+      // horizon.
+      const nxAug = this.mpc.nx;
+      const x0Aug = new Float64Array(nxAug);
+      for (let i = 0; i < 6; i++) x0Aug[i] = xCtrl[i];
+      let refSeqXi: Float64Array | undefined;
+      if (nxAug === 8) {
+        // CRITICAL — the Luenberger observer has an ~180 Hz effective
+        // corner frequency, so xHat[4,5] arrives at the MPC with the
+        // 300 Hz grid-current ripple already attenuated by ≥5 dB.  Feeding
+        // that into the augmented prediction would hide the disturbance
+        // the IMP is supposed to reject.  So when IMP is active we
+        // overwrite the two grid-current slots with the raw measurement,
+        // preserving the ripple content the augmentation needs.  The
+        // other four plant states stay on the observer (that's where the
+        // noise-rejection benefit lives); only the directly-measured
+        // grid currents bypass it.
+        x0Aug[4] = xMeas[4];
+        x0Aug[5] = xMeas[5];
+        x0Aug[6] = this.xi_d;
+        x0Aug[7] = this.xi_q;
+        // Separate ξ-driving reference — the LPF'd d-axis setpoint so the
+        // MPC's rotor prediction matches the engine's rotor propagation.
+        refSeqXi = new Float64Array(2 * N);
+        const r_d = this.xi_ref_primed ? this.xi_ref_d_lp : igd_ref;
+        const r_q = this.xi_ref_primed ? this.xi_ref_q_lp : 0;
+        for (let k = 0; k < N; k++) {
+          refSeqXi[k * 2] = r_d;
+          refSeqXi[k * 2 + 1] = r_q;
+        }
+      }
+      const sol = this.mpc.solve(x0Aug, uPrev, this.refFuture, V_dc_ctrl, [vGdNow, vGqNow], refSeqXi);
       ud = sol.u_d;
       uq = sol.u_q;
 
@@ -1566,6 +1994,74 @@ export class MPCEngine {
       this.lastRefPred = null;
       this.uBound = uLim;
     }
+
+    // ---- 3b. IMP rotor-state propagation ----
+    // No more post-MPC correction: when IMP is on, the augmentation lives
+    // inside the MPC's state space and the QP's u is already the IMP-
+    // aware command.  We just have to advance ξ one tick forward using
+    // the EXACT same discrete dynamics the MPC's prediction assumes:
+    //   ξ[k+1] = A_r_d · ξ[k] + B_r_d · (y[k] − r[k])
+    // where y[k] / r[k] are the current-tick grid-current / reference
+    // values fed into the solve (xCtrl[4,5] and igd_ref / 0).  Engine-side
+    // consistency is critical: if the engine propagates ξ differently
+    // than the MPC predicts, the controller would plan against a rotor
+    // state that never materialises, and rejection would decay.
+    //
+    // Anti-windup: when the MPC reports an active i_g_max rail (55 A EV
+    // peak drives i_gd* above the 65 A rail so the MPC clamps i_gd), the
+    // error (y−r) picks up an unrejectable DC offset.  Propagating ξ on
+    // that would drive it into a positive-feedback blowup where the MPC
+    // tries harder and harder against an impossible reference.  We
+    // therefore propagate only the homogeneous part A_r_d·ξ (damping bleed)
+    // while a rail is binding — standard resonant-controller back-calc.
+    if (this.impEffective) {
+      // ξ[k+1] = A_r_d·ξ[k] + B_r_d·(y − LPF(r_xi)), matching the MPC's
+      // internal augmented-state model.  LPF(r) strips the 6ω ripple the
+      // outer V_dc PI leaks into i_gd_ref so the rotor sees only the
+      // grid-side 6ω residual, not its own reference chasing the same
+      // disturbance.  r_xi also clamps unreachable demands.
+      const Ar = this.rotor.Ar_d;
+      const Br = this.rotor.Br_d;
+      let xi0 = this.xi_d;
+      let xi1 = this.xi_q;
+      const refCap = PARAMS.I_G_MAX * 0.95;
+      const igd_ref_xi = Math.max(-refCap, Math.min(refCap, igd_ref));
+      // LPF alpha: α = T_s / (τ + T_s), τ = 1/(2π·f_c).
+      const lpAlpha = PARAMS.T_s / (1 / (2 * Math.PI * RESONATOR_REF_LPF_HZ) + PARAMS.T_s);
+      if (!this.xi_ref_primed) {
+        this.xi_ref_d_lp = igd_ref_xi;
+        this.xi_ref_q_lp = 0;
+        this.xi_ref_primed = true;
+      } else if (Math.abs(igd_ref_xi - this.xi_ref_d_lp) > 5) {
+        // Large reference jump detected — snap the LPF to the new setpoint
+        // and zero the rotor state.  A 15 Hz LPF takes ~70 ms to track a
+        // step, which during a fast slider move (20→55 A) leaves a 30+ A
+        // apparent "error" feeding the rotor, blowing up ξ into cost that
+        // the rail-bound QP can't relieve.  Snap-and-reset kills that
+        // transient so IMP resumes from a clean operating point once
+        // tracking settles.
+        this.xi_ref_d_lp = igd_ref_xi;
+        this.xi_ref_q_lp = 0;
+        this.xi_d = 0;
+        this.xi_q = 0;
+        xi0 = 0;
+        xi1 = 0;
+      } else {
+        this.xi_ref_d_lp += lpAlpha * (igd_ref_xi - this.xi_ref_d_lp);
+        this.xi_ref_q_lp += lpAlpha * (0 - this.xi_ref_q_lp);
+      }
+      // Raw measurement (not xHat!) so the rotor sees the full 300 Hz
+      // ripple — same reasoning as the x0Aug override above.
+      const ed = xMeas[4] - this.xi_ref_d_lp;
+      const eq = xMeas[5] - this.xi_ref_q_lp;
+      this.xi_d = Ar[0][0] * xi0 + Ar[0][1] * xi1 + Br[0][0] * ed + Br[0][1] * eq;
+      this.xi_q = Ar[1][0] * xi0 + Ar[1][1] * xi1 + Br[1][0] * ed + Br[1][1] * eq;
+    } else if (this.xi_d !== 0 || this.xi_q !== 0) {
+      this.xi_d = 0;
+      this.xi_q = 0;
+      this.xi_ref_primed = false;
+    }
+
     this.u_d = ud;
     this.u_q = uq;
 

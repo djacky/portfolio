@@ -32,10 +32,10 @@ const PENDUBOT_MODE: PendubotMode = "full";
 ================================================================ */
 const G_PHYS = 10;
 const M1 = 1, M2 = 0.3;
-const L1 = 0.6, L2 = 0.6;
+const L1 = 0.7, L2 = 0.7;
 const LC1 = L1 / 2, LC2 = L2 / 2;
 const I1 = M1 * L1 * L1 / 12, I2 = M2 * L2 * L2 / 12;
-const MAX_TORQUE = PENDUBOT_MODE == 'full' ? 20 : 10;
+const MAX_TORQUE = PENDUBOT_MODE == 'full' ? 15 : 10;
 const DT = 0.05;
 const MAX_SPEED = 15;
 const DAMP1 = 0.02;

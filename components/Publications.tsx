@@ -131,7 +131,7 @@ export default function Publications() {
             className="mt-2 text-4xl md:text-5xl font-semibold text-gradient"
           />
           <Typewriter
-            text="Selected publications from a decade of research at EPFL and CERN."
+            text="Selected publications from a decade of control-systems research at EPFL and CERN. Recent ML work — PPO fleet policies at Eaton, transformer matchmaker at Disruptive Labs — lives in production rather than papers."
             as="p"
             speed={18}
             delay={1100}

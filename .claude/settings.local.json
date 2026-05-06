@@ -110,7 +110,12 @@
       "Bash(grep -oE '\"[a-zA-Z_]{1,30}\":\\\\|\\\\.[a-zA-Z_]{1,20}\\\\[' /e/Projects/portfolio/node_modules/scs-solver/dist/scs.mjs)",
       "PowerShell(npx next dev 2>&1)",
       "PowerShell(try { $r = Invoke-WebRequest -UseBasicParsing -Uri http://localhost:3001/ -TimeoutSec 30; \"status=$\\($r.StatusCode\\) bytes=$\\($r.Content.Length\\)\" } catch { \"FAIL: $\\($_.Exception.Message\\)\" })",
-      "PowerShell(npx next build 2>&1 | Select-String -Pattern \"\\(error|Error|ERROR|fail|Fail|Compiled|✓|✗\\)\" | Select-Object -First 20; \"exit=$LASTEXITCODE\")"
+      "PowerShell(npx next build 2>&1 | Select-String -Pattern \"\\(error|Error|ERROR|fail|Fail|Compiled|✓|✗\\)\" | Select-Object -First 20; \"exit=$LASTEXITCODE\")",
+      "Bash(grep -v \"^$\")",
+      "PowerShell(npx tsc --noEmit 2>&1 | Select-Object -First 80)",
+      "PowerShell(npm run *)",
+      "PowerShell(npx tsc --noEmit -p . 2>&1 | Select-Object -First 50)",
+      "PowerShell(npx tsc --noEmit 2>&1 | Select-Object -First 40)"
     ]
   }
 }

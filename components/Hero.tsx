@@ -15,8 +15,9 @@ import type { SiteStats } from "@/lib/siteStats";
 const PendulumScene = dynamic(() => import("./PendulumScene"), { ssr: false });
 
 const STATIC_CREDENTIALS: ReactNode[] = [
-  "10+ yrs in R&D + production ML",
-  "Python · PyTorch · FastAPI · C++ · AWS",
+  "Control Systems · H∞ · MPC · System ID",
+  "Reinforcement Learning · Deep Learning · Applied ML",
+  "Python · FastAPI · AWS · Distributed Backends",
 ];
 
 const CREDENTIAL_HOLD = 3200;

@@ -66,14 +66,28 @@ export default function TickerNav() {
       transition={{ duration: 0.4 }}
       className="fixed top-5 left-0 right-0 z-50 h-10 flex items-center"
     >
-      <div className="shrink-0 flex items-center gap-2 px-3">
+      <div className="shrink-0 flex items-center gap-2 px-4">
         <button
           type="button"
           onClick={() => goTo("hero")}
           aria-label="Home"
-          className="flex items-center justify-center w-6 h-6 rounded text-gray-500 hover:text-accent2 transition-colors"
+          title="Home"
+          className={`group relative flex items-center justify-center w-9 h-9 rounded-md border transition-all duration-200 ${
+            activeSection === "hero"
+              ? "border-accent2/60 bg-accent2/10 text-accent2 glow-accent2"
+              : "border-accent2/25 bg-panel/40 text-accent2/70 hover:text-accent2 hover:border-accent2/60 hover:bg-accent2/10 hover:shadow-[0_0_14px_rgba(34,211,238,0.35)]"
+          }`}
         >
-          <Home className="w-4 h-4" />
+          <Home className="w-[18px] h-[18px] transition-transform duration-200 group-hover:scale-110" />
+          <span
+            aria-hidden
+            className="pointer-events-none absolute inset-0 rounded-md opacity-0 group-hover:opacity-100 transition-opacity duration-200"
+            style={{
+              background:
+                "linear-gradient(120deg, rgba(124,92,255,0.18), rgba(34,211,238,0.18))",
+              mixBlendMode: "screen",
+            }}
+          />
         </button>
       </div>
 

@@ -106,7 +106,7 @@ function makePlant(spec: PlantSpec): Plant {
 // reasonable midpoint of the Fs/25..Fs/8 = 80..250 Hz slider range.
 const DEFAULT_BW_HZ = 200;
 const DEFAULT_ZETA = 0.8;
-const DEFAULT_ORDER = 5;
+const DEFAULT_ORDER = 6;
 
 /* ------------------------------------------------------------------
    Plant 1 — First-order magnet (Rs + sL) with pure actuator delay.
@@ -359,35 +359,60 @@ const PLANT_4: Plant = makePlant({
 });
 
 /* ------------------------------------------------------------------
-   Plant 5 — DC motor with integrator (position output).
-     G(s) = Km / (s (τ s + 1))
-   Needs coprime factorization to pull the j-axis pole into M:
-     F(s) = (s+a)²,  a = 2π·desBwHz
-     N(s) = Km / (s+a)²,  M(s) = s(τ s + 1) / (s+a)²
+   Plant 5 — DC motor with integrator, electrical pole, and delay.
+     G(s) = Km · e^{-s τ_d} / [s · (τ_m s + 1) · (τ_e s + 1)]
+   Models a digital servo drive: position output (integrator), mechanical
+   inertia/friction pole at 1/τ_m ≈ 16 Hz, armature electrical pole at
+   1/τ_e ≈ 160 Hz, and 150 µs of sample + ZOH + PWM + compute delay.
+
+   For the coprime factorization we rewrite the plant in MONIC form by
+   absorbing τ_m τ_e into the gain — this is critical for numerical
+   conditioning of the SOCP:
+     G(s) = K' · e^{-s τ_d} / [s (s + p_m)(s + p_e)],
+            K' = Km / (τ_m τ_e),  p_m = 1/τ_m,  p_e = 1/τ_e
+   Then with F(s) = (s+a)³, a = 2π·desBwHz,
+     N(s) = K' e^{-s τ_d} / (s+a)³
+     M(s) = s (s + p_m)(s + p_e) / (s+a)³
+   The non-monic form A(s) = s(τ_m s+1)(τ_e s+1) has leading coefficient
+   τ_m τ_e ≈ 1e-5, which makes |M| → 1e-5 at high frequency and |N(0)|
+   ≈ Km/a³ ≈ 5e-8 — both are five orders of magnitude smaller than
+   anything the SCS solver expects, and γ blows up.  The monic rewrite
+   keeps |M| → 1 and |N(0)| ≈ K'/a³ ≈ 5e-3 — still small at DC but in
+   the right ballpark.  Same plant, just numerically well-posed.
+
+   The delay stays in N as a non-rational factor — synthesis only needs
+   the complex FRF, so e^{-jω τ_d} comes along for free.
    ------------------------------------------------------------------ */
 
 const MOTOR_KM = 100.0;
-const MOTOR_TAU = 0.01;   // mechanical pole at 100 rad/s ≈ 16 Hz
+const MOTOR_TAU_M = 0.01;    // mechanical pole at 100 rad/s ≈ 16 Hz
+const MOTOR_TAU_E = 1e-3;    // electrical pole at 1000 rad/s ≈ 160 Hz
+const MOTOR_TAU_D = 150e-6;  // 150 µs sample + ZOH + PWM + compute delay
+const MOTOR_PM = 1 / MOTOR_TAU_M;                  // 100 rad/s
+const MOTOR_PE = 1 / MOTOR_TAU_E;                  // 1000 rad/s
+const MOTOR_KP = MOTOR_KM * MOTOR_PM * MOTOR_PE;   // monic-form gain K' = 1e7
 
 const PLANT_5: Plant = makePlant({
   id: "dc-motor",
   label: "DC motor · position",
-  sub: "integrator + pole",
+  sub: "integrator + 2 poles · 150 µs delay",
   description:
-    "Servo-driven DC motor with position output: the plant has an integrator on the jω axis, so we use the same coprime trick as the pendulum — F(s) = (s+a)² pulls the integrator into a stable factor M(s). Mechanical pole at 1/τ ≈ 16 Hz, open-loop crossover ≈ 13 Hz. This is the standard Karimi approach for type-1 plants.",
-  latex: String.raw`G(s) \;=\; \dfrac{K_m}{s\,(\tau\,s + 1)}, \quad K_m = 100,\; \tau = 10\,\text{ms}`,
-  dominantPoleRad: 1.0 / MOTOR_TAU, // mechanical pole dominates the shape
+    "Digital servo-driven DC motor with position output: integrator on the jω axis, mechanical pole at 1/τ_m ≈ 16 Hz, armature electrical pole at 1/τ_e ≈ 160 Hz (just below the closed-loop target), plus 150 µs of sample + ZOH + PWM + compute delay. Same Karimi coprime trick as the pendulum but bumped to F(s) = (s+a)³ for the third-order rational denominator; the delay rides along inside N as a non-rational e^{-jω τ_d} factor — pyfresco handles it because synthesis only needs the complex FRF, not a state-space realization.",
+  latex: String.raw`G(s) \;=\; \dfrac{K_m\;e^{-s\,\tau_d}}{s\,(\tau_m\,s + 1)\,(\tau_e\,s + 1)}, \quad K_m = 100,\; \tau_m = 10\,\text{ms},\; \tau_e = 1\,\text{ms},\; \tau_d = 150\,\mu s`,
+  dominantPoleRad: 1.0 / MOTOR_TAU_M, // mechanical pole sets the low-freq shape
   frf: (w) => {
-    // G(jω) = Km / (jω · (jω·τ + 1))
+    // G(jω) = Km · e^(-jωτ_d) / (jω · (jωτ_m + 1) · (jωτ_e + 1))
     const jw = c(0, w);
-    const tauJw1 = c(1, w * MOTOR_TAU);
-    const denom = cMul(jw, tauJw1);
+    const tauMJw1 = c(1, w * MOTOR_TAU_M);
+    const tauEJw1 = c(1, w * MOTOR_TAU_E);
+    const denom = cMul(cMul(jw, tauMJw1), tauEJw1);
     const denomMag2 = denom.re * denom.re + denom.im * denom.im;
     if (denomMag2 < 1e-30) return c(1e30, 0);
-    return c(
+    const ratio = c(
       (MOTOR_KM * denom.re) / denomMag2,
       (-MOTOR_KM * denom.im) / denomMag2,
     );
+    return cMul(ratio, cExp(-w * MOTOR_TAU_D));
   },
   buildCoprime: (w, desBwHz) => {
     const a = 2 * Math.PI * desBwHz;
@@ -395,18 +420,22 @@ const PLANT_5: Plant = makePlant({
     const M: Complex[] = new Array(w.length);
     for (let k = 0; k < w.length; k++) {
       const wk = w[k];
-      // F(jω) = (a + jω)²
-      const fRe = a * a - wk * wk;
-      const fIm = 2 * a * wk;
+      // F(jω) = (a + jω)³  →  Re = a(a² − 3ω²),  Im = ω(3a² − ω²)
+      const fRe = a * (a * a - 3 * wk * wk);
+      const fIm = wk * (3 * a * a - wk * wk);
       const fMag2 = fRe * fRe + fIm * fIm;
+      // N(jω) = K' · e^(-jωτ_d) / F(jω) = K'·e^(-jωτ_d) · conj(F) / |F|²
+      const nNumRe =  MOTOR_KP * Math.cos(wk * MOTOR_TAU_D);
+      const nNumIm = -MOTOR_KP * Math.sin(wk * MOTOR_TAU_D);
       N[k] = {
-        re: (MOTOR_KM * fRe) / fMag2,
-        im: (-MOTOR_KM * fIm) / fMag2,
+        re: (nNumRe * fRe + nNumIm * fIm) / fMag2,
+        im: (nNumIm * fRe - nNumRe * fIm) / fMag2,
       };
-      // A(jω) = jω·(τ·jω + 1) = jω − τω²
-      const aRe = -MOTOR_TAU * wk * wk;
-      const aIm = wk;
-      // M = A·conj(F) / |F|²
+      // A(jω) = jω · (jω + p_m) · (jω + p_e)  [monic]
+      //       = −(p_m + p_e)·ω² + j·ω·(p_m·p_e − ω²)
+      const aRe = -(MOTOR_PM + MOTOR_PE) * wk * wk;
+      const aIm = wk * (MOTOR_PM * MOTOR_PE - wk * wk);
+      // M = A · conj(F) / |F|²
       M[k] = {
         re: (aRe * fRe + aIm * fIm) / fMag2,
         im: (aIm * fRe - aRe * fIm) / fMag2,

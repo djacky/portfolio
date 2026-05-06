@@ -10,7 +10,7 @@ import { motion } from "framer-motion";
 */
 
 const TITLES = [
-  "Senior AI/ML Engineer.",
+  "AI/ML Engineer.",
   "Research Engineer.",
   "Backend Engineer.",
   "Control Systems Engineer.",

@@ -15,12 +15,54 @@
 
 export const CANDIDATE_DOSSIER = `
 # CANDIDATE: Achille Nicoletti
-Senior AI/ML Engineer · PhD, EPFL Lausanne · Based in Geneva, CH
-Open to: senior IC roles in AI/ML, applied research, ML infrastructure.
+PhD, EPFL Lausanne · Based in Geneva, CH
+Open to: senior IC roles across three buckets — Control Systems,
+AI/ML Research Engineer, and Python Backend.
 
 ## ONE-LINE POSITIONING
-PhD-trained control theorist who ships production ML systems end-to-end:
-PyTorch models, FastAPI/AWS backends, and the embedded C++ underneath.
+PhD control theorist transitioning into AI/ML and backend engineering.
+Published research in control (H∞, data-driven synthesis, ILC);
+shipped production RL (Eaton EV fleet) and production Python backends
+(FastAPI / AWS, 250k+ daily requests).
+
+## ROLE ARCHETYPES (score JDs against the bucket they fit)
+
+STRONG FIT — Control Systems / Research Engineer:
+  Controls, MPC, H∞/H2, system identification, convex optimization,
+  embedded C++, real-time loops, HIL/SIL, power electronics, robotics,
+  autonomous vehicles, accelerator/physics instrumentation.
+  This is the candidate's primary specialization — PhD + 10 years
+  published research + shipped hardware. Score generously.
+
+STRONG FIT — AI/ML Engineer / Applied Research:
+  Reinforcement learning (PPO, actor-critic), deep learning (PyTorch,
+  Transformers, Siamese nets), convex/stochastic optimization, applied
+  research, ML infra, model serving, inference at scale.
+  Note: transitioning from controls — has shipped RL and deep learning
+  to production but no NeurIPS/ICML publications. Treat production ML
+  track record (Eaton PPO, Disruptive transformer matchmaker) as the
+  evidence, not papers. Score as STRONG when the role is applied /
+  research-engineering rather than pure ML academic research.
+
+STRONG FIT — Backend / Python Engineer:
+  Python, FastAPI, Pydantic, AWS (Lambda, EC2, S3, SNS, SQS, DynamoDB,
+  Cognito), PostgreSQL, Docker, CI/CD, distributed systems, API design,
+  auth (OAuth2, JWT), observability, compliance (SOC 2 Type II).
+  Decade of shipping Python in production, founder-level ownership of
+  distributed AWS backends. Score as STRONG for backend-Python roles,
+  especially ones with an ML/data/research angle.
+
+PARTIAL FIT:
+  - Pure frontend / React-only (TypeScript is used for tooling, not primary)
+  - Kubernetes / Terraform (day-to-day but not deep specialty)
+  - LLMs, RAG, agentic systems (recent applied work, not multi-year)
+  - Pure ML-academic roles expecting NeurIPS/ICML publication record
+
+GAP:
+  - iOS / Swift / native mobile
+  - Frontend-only (designer-developer, marketing sites)
+  - Pure data engineering / Spark / Snowflake without ML angle
+  - Management-only roles with no IC component
 
 ## CORE STRENGTHS
 - Deep learning & RL in PyTorch (PPO, REINFORCE, actor-critic, Siamese networks)
@@ -132,23 +174,15 @@ Siamese embedding network for player matchmaking in a multiplayer game.
 Production system handling 250k+ daily API requests with sub-second
 matchmaking latency.
 
-## WHAT TO LOOK FOR WHEN MATCHING
+## MATCHING GUIDANCE
 
-Strong fit signals (score these as MET when present in a JD):
-- Python, PyTorch, FastAPI, AWS — primary stack, decade of use
-- RL, deep learning, convex optimization, control theory
-- End-to-end ownership, founder mentality, production ML
-- Hardware-in-the-loop, embedded C++, real-time systems
-- PhD-level rigor, research → production translation
+Before scoring, identify which of the three STRONG-FIT archetypes above
+the JD most resembles (Controls, AI/ML, or Backend-Python). Score the
+JD's requirements against that bucket's strengths — don't penalize a
+controls JD for lacking ML requirements or vice versa.
 
-Partial fit signals (score as PARTIAL):
-- TypeScript / React / Next.js — used for tooling, not primary
-- Kubernetes, Terraform — day-to-day but not deep specialty
-- LLMs, RAG, agentic systems — recent applied work, not multi-year track record
-
-Out-of-scope (score as GAP honestly):
-- iOS / Swift / native mobile development
-- Frontend-only roles (designer-developer, marketing sites)
-- Pure data-engineering / Spark / Snowflake-heavy roles without an ML angle
-- Management-only roles with no IC component
+For cross-bucket JDs (e.g., "RL for robotics", "ML engineer with
+controls background", "Python backend for scientific computing"),
+this is the sweet spot: score as STRONG and explicitly call out the
+bridge in the rationale.
 `.trim();

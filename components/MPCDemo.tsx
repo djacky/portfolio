@@ -28,7 +28,7 @@ import {
   Pause,
   RotateCcw,
   Zap,
-  ZapOff,
+  Waves,
   Radio,
   Activity,
   Gauge,
@@ -100,8 +100,12 @@ export default function MPCDemo() {
     engineRef.current?.setLoadCurrent(a);
     setTick((n) => n + 1);
   }, []);
-  const onGridSag = useCallback(() => {
-    engineRef.current?.toggleGridSag();
+  const onGridHarmonic = useCallback(() => {
+    engineRef.current?.toggleGridHarmonic();
+    setTick((n) => n + 1);
+  }, []);
+  const onHarmonicReject = useCallback(() => {
+    engineRef.current?.toggleHarmonicReject();
     setTick((n) => n + 1);
   }, []);
   const onNoise = useCallback(() => {
@@ -260,10 +264,12 @@ export default function MPCDemo() {
 
           <DisturbanceConsole
             carCurrent={engine.i_load}
-            sagActive={engine.gridSagActive}
+            harmonicActive={engine.gridHarmonicActive}
+            rejectOn={engine.harmonicRejectOn}
             noiseOn={engine.noiseOn}
             onCarCurrent={onCarCurrent}
-            onSag={onGridSag}
+            onHarmonic={onGridHarmonic}
+            onHarmonicReject={onHarmonicReject}
             onNoise={onNoise}
           />
 
@@ -572,17 +578,21 @@ function OptimizerHUD({
 
 function DisturbanceConsole({
   carCurrent,
-  sagActive,
+  harmonicActive,
+  rejectOn,
   noiseOn,
   onCarCurrent,
-  onSag,
+  onHarmonic,
+  onHarmonicReject,
   onNoise,
 }: {
   carCurrent: number;
-  sagActive: boolean;
+  harmonicActive: boolean;
+  rejectOn: boolean;
   noiseOn: boolean;
   onCarCurrent: (a: number) => void;
-  onSag: () => void;
+  onHarmonic: () => void;
+  onHarmonicReject: () => void;
   onNoise: () => void;
 }) {
   return (
@@ -591,14 +601,19 @@ function DisturbanceConsole({
         Disturbance theatre
       </div>
       <EVDemandSlider value={carCurrent} onChange={onCarCurrent} />
-      <DisturbanceBtn
-        label={sagActive ? "Grid sag · holding" : "Grid sag"}
-        sub="v_gd −30% while held · LVRT ride-through"
-        icon={<ZapOff className="w-3.5 h-3.5" />}
-        active={sagActive}
-        onClick={onSag}
-        tint={ACCENT_GOLD}
-      />
+      <div className="flex items-stretch gap-2">
+        <div className="flex-1 min-w-0">
+          <DisturbanceBtn
+            label={harmonicActive ? "5th harmonic · holding" : "Grid 5th harmonic"}
+            sub="±8% v_g · 300 Hz ripple in dq · IEEE 519 envelope"
+            icon={<Waves className="w-3.5 h-3.5" />}
+            active={harmonicActive}
+            onClick={onHarmonic}
+            tint={ACCENT_GOLD}
+          />
+        </div>
+        <RejectToggle rejectOn={rejectOn} onClick={onHarmonicReject} />
+      </div>
       <DisturbanceBtn
         label="Inject noise"
         sub="±2.5 A current · ±6 V V_dc"
@@ -608,6 +623,43 @@ function DisturbanceConsole({
         tint={ACCENT}
       />
     </div>
+  );
+}
+
+function RejectToggle({
+  rejectOn,
+  onClick,
+}: {
+  rejectOn: boolean;
+  onClick: () => void;
+}) {
+  const tint = ACCENT_CYAN;
+  return (
+    <button
+      onClick={onClick}
+      title="Toggle IMP harmonic-rejection companion (2-state resonator at 6ω, K_r·ξ added to u)"
+      className="rounded-lg border transition-colors flex flex-col items-center justify-center w-[78px] shrink-0 px-1 py-2 text-center"
+      style={{
+        borderColor: rejectOn ? `${tint}66` : "rgba(255,255,255,0.08)",
+        background: rejectOn ? `${tint}12` : "rgba(255,255,255,0.02)",
+      }}
+    >
+      <span
+        className="text-[9px] font-mono uppercase tracking-[0.12em] leading-tight"
+        style={{ color: rejectOn ? tint : "#94a3b8" }}
+      >
+        IMP reject
+      </span>
+      <span
+        className="text-[10px] font-mono mt-0.5"
+        style={{ color: rejectOn ? tint : "#6b7280" }}
+      >
+        {rejectOn ? "ON" : "OFF"}
+      </span>
+      <span className="text-[8.5px] font-mono text-gray-500 mt-0.5 leading-tight">
+        K<sub>r</sub>·ξ @ 6ω
+      </span>
+    </button>
   );
 }
 

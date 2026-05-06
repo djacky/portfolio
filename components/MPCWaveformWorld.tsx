@@ -242,11 +242,15 @@ function Scene({ engineRef, playing, slowMo }: SceneProps) {
       predPosC[0] = X_PAST_MAX; predPosC[1] = iToY(icNow); predPosC[2] = Z_PRED;
       predPosGd[0] = X_PAST_MAX; predPosGd[1] = idToY(engine.i_gd_meas); predPosGd[2] = Z_PRED;
 
+      // Predicted state stride per horizon step — 6 when running the
+      // plain MPC, 8 when the IMP augmentation appends two resonator
+      // states.  Plant indices i_gd / i_gq are always 4 / 5 of each block.
+      const nxStride = engine.mpc.nx;
       for (let k = 0; k < N; k++) {
         // Predicted state at horizon index k (1-indexed):
-        //   i_gd, i_gq are at offsets 4, 5 of each 6-block.
-        const igd = engine.lastXPred[k * 6 + 4];
-        const igq = engine.lastXPred[k * 6 + 5];
+        //   i_gd, i_gq are at offsets 4, 5 of each block.
+        const igd = engine.lastXPred[k * nxStride + 4];
+        const igq = engine.lastXPred[k * nxStride + 5];
         const theta_k = engine.theta + (k + 1) * PARAMS.T_s * 2 * Math.PI * PARAMS.f_grid;
         const [ia_k, ib_k, ic_k] = dqToAbc(igd, igq, theta_k);
         const x = X_PAST_MAX + (X_FUT_EXT * (k + 1)) / N;
@@ -279,8 +283,8 @@ function Scene({ engineRef, playing, slowMo }: SceneProps) {
         for (let k = 0; k < MAX_N; k++) {
           if (k < N) {
             const x = X_PAST_MAX + (X_FUT_EXT * (k + 1)) / N;
-            const igd = engine.lastXPred[k * 6 + 4];
-            const igq = engine.lastXPred[k * 6 + 5];
+            const igd = engine.lastXPred[k * nxStride + 4];
+            const igq = engine.lastXPred[k * nxStride + 5];
             const theta_k = engine.theta + (k + 1) * PARAMS.T_s * 2 * Math.PI * PARAMS.f_grid;
             const [ia_k] = dqToAbc(igd, igq, theta_k);
             const s = 1 - 0.55 * (k / N);

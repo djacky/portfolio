@@ -54,6 +54,26 @@ const TABS: {
       "How do you split limited power across dozens of electric vehicles charging at once without blowing the grid? This demo trains a reinforcement learning agent live in your browser to make that call every second, the way the production system does for Eaton's global charger fleet.",
   },
   {
+    key: "cern",
+    hash: "demo-cern",
+    label: "Automated Controller Synthesis",
+    sub: "CERN · H∞ / H2 synthesis",
+    icon: Atom,
+    tint: "#34d399",
+    context:
+      "The LHC's magnets need controllers tuned to parts per million precision, but each power converter behaves a little differently. This demo recreates the automated pipeline I built at CERN: feed in a frequency response, pick your performance specs, and get back a controller ready to flash onto the hardware.",
+  },
+  {
+    key: "aws",
+    hash: "demo-aws",
+    label: "Live Match Backend",
+    sub: "FastAPI · Lambda · Postgres",
+    icon: Network,
+    tint: "#fb923c",
+    context:
+      "Thirty players, one prize pool, and a full slice of the real AWS plumbing I shipped at Disruptive Labs. Place a bet, inject a bad payload, or crash the GameLift fleet and watch the ingress, database, queue, and payout Lambda behave the way they would in production.",
+  },
+  {
     key: "matchmaker",
     hash: "demo-matchmaker",
     label: "Transformer Matchmaker",
@@ -64,36 +84,6 @@ const TABS: {
       "Today's ranking systems boil a player down to one number. This one reads each player as a sequence of past matches, the way an LLM reads tokens, and infers their skill, playstyle, and whether they're a smurf from the sequence alone.",
   },
   {
-    key: "cern",
-    hash: "demo-cern",
-    label: "Automated Controller Synthesis",
-    sub: "CERN",
-    icon: Atom,
-    tint: "#34d399",
-    context:
-      "The LHC's magnets need controllers tuned to parts per million precision, but each power converter behaves a little differently. This demo recreates the automated pipeline I built at CERN: feed in a frequency response, pick your performance specs, and get back a controller ready to flash onto the hardware.",
-  },
-  {
-    key: "ilc",
-    hash: "demo-ilc",
-    label: "Data-Driven Iterative Learning",
-    sub: "CERN",
-    icon: Activity,
-    tint: "#fbbf24",
-    context:
-      "Particle physics experiments need magnet currents that follow precise ramp profiles, but real hardware drifts trial after trial. This demo runs iterative learning control: the algorithm watches each ramp, learns from the tracking error, and converges on a correction signal that nails the reference.",
-  },
-  {
-    key: "aws",
-    hash: "demo-aws",
-    label: "Live Match Backend",
-    sub: "Disruptive Labs",
-    icon: Network,
-    tint: "#fb923c",
-    context:
-      "Thirty players, one prize pool, and a full slice of the real AWS plumbing I shipped at Disruptive Labs. Place a bet, inject a bad payload, or crash the GameLift fleet and watch the ingress, database, queue, and payout Lambda behave the way they would in production.",
-  },
-  {
     key: "mpc",
     hash: "demo-mpc",
     label: "AC/DC Converter MPC",
@@ -102,6 +92,16 @@ const TABS: {
     tint: "#f472b6",
     context:
       "A grid connected power converter tracking a sinusoidal current reference, steered by a convex QP that solves fresh every millisecond right in your browser. The glowing arc ahead of each phase trace is the controller's predicted future; drop a load step or push the reference up and watch it bend away from the red current rails.",
+  },
+  {
+    key: "ilc",
+    hash: "demo-ilc",
+    label: "Data-Driven Iterative Learning",
+    sub: "CERN · ILC on real hardware",
+    icon: Activity,
+    tint: "#fbbf24",
+    context:
+      "Particle physics experiments need magnet currents that follow precise ramp profiles, but real hardware drifts trial after trial. This demo runs iterative learning control: the algorithm watches each ramp, learns from the tracking error, and converges on a correction signal that nails the reference.",
   },
 ];
 
