@@ -647,14 +647,17 @@ export default function CERNDemo() {
       );
     });
     solveHandle.current = handle;
-    // Wall-clock timeout: if the worker can't finish in 45 s, cancel and
-    // surface an infeasibility hint.  The 3D scene is already hovering
-    // on the H∞ block so the user just sees a graceful transition.
+    // Wall-clock timeout: if the worker can't finish in 45 s, ask it
+    // to bail. The worker returns the best feasible iterate found so
+    // far (which the .then() branch promotes to results) — or, if the
+    // bisection hadn't produced any feasible step yet, an infeasible
+    // result that we surface as a "timed out" hint. The 3D scene is
+    // already hovering on the H∞ block so the user sees a graceful
+    // transition either way.
+    let timedOut = false;
     solveTimeout.current = setTimeout(() => {
+      timedOut = true;
       handle.cancel();
-      setInfeasibleHint(
-        "Synthesis timed out. Try relaxing the modulus margin, lowering the bandwidth, or raising the damping ratio.",
-      );
     }, 45000);
     const clear = () => {
       if (solveTimeout.current) {
@@ -667,6 +670,10 @@ export default function CERNDemo() {
         clear();
         if (res.feasible) {
           setResults(res);
+        } else if (timedOut) {
+          setInfeasibleHint(
+            "Synthesis timed out before finding a feasible controller. Try relaxing the modulus margin, lowering the bandwidth, or raising the damping ratio.",
+          );
         } else {
           setInfeasibleHint(res.infeasibilityHint ?? "No feasible controller for these specs.");
         }

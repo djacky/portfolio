@@ -38,13 +38,11 @@ export function synthesizeInWorker(
   const worker = getWorker();
   const id = nextId++;
   let listener: ((ev: MessageEvent<WorkerResponse>) => void) | null = null;
-  let cancelled = false;
 
   const promise = new Promise<SynthesisResult>((resolve, reject) => {
     listener = (ev: MessageEvent<WorkerResponse>) => {
       const msg = ev.data;
       if (msg.id !== id) return;
-      if (cancelled) return;
       switch (msg.type) {
         case "progress":
           onProgress?.({
@@ -65,15 +63,20 @@ export function synthesizeInWorker(
       }
     };
     worker.addEventListener("message", listener);
-    const req: WorkerRequest = { id, plantId, specs };
+    const req: WorkerRequest = { id, type: "solve", plantId, specs };
     worker.postMessage(req);
   });
 
   return {
     promise,
+    // Soft cancel: ask the worker to stop after the current bisection
+    // iteration and return the best feasible iterate it has so far
+    // (or the standard infeasible result if none was found yet). The
+    // listener stays attached so the promise still resolves with the
+    // worker's response — the caller's .then() handles both branches.
     cancel: () => {
-      cancelled = true;
-      if (listener) worker.removeEventListener("message", listener);
+      const req: WorkerRequest = { id, type: "cancel" };
+      worker.postMessage(req);
     },
   };
 }

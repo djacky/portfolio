@@ -10,11 +10,14 @@ import {
   synthesizeController,
 } from "./hinf-synthesis";
 
-export interface WorkerRequest {
-  id: number;
-  plantId: string;
-  specs: SynthesisSpecs;
-}
+export type WorkerRequest =
+  | {
+      id: number;
+      type?: "solve";
+      plantId: string;
+      specs: SynthesisSpecs;
+    }
+  | { id: number; type: "cancel" };
 
 export type WorkerResponse =
   | {
@@ -34,22 +37,38 @@ export type WorkerResponse =
 
 const ctx = self as unknown as Worker;
 
+// IDs of in-flight solves that have been asked to bail. The synthesis
+// loop polls this set after every bisection step and returns its best
+// feasible iterate so far (or the standard infeasible result if it
+// has none yet).
+const cancelled = new Set<number>();
+
 ctx.addEventListener("message", async (ev: MessageEvent<WorkerRequest>) => {
-  const { id, plantId, specs } = ev.data;
+  const req = ev.data;
+  if (req.type === "cancel") {
+    cancelled.add(req.id);
+    return;
+  }
+  const { id, plantId, specs } = req;
   try {
     const plant = plantById(plantId);
     const grid = plant.buildGrid(specs.Ts, specs.desBw);
-    const result = await synthesizeController(grid, specs, (p) => {
-      const msg: WorkerResponse = {
-        id,
-        type: "progress",
-        iter: p.iter,
-        gamma: p.gamma,
-        bw: p.bw,
-        feasible: p.feasible,
-      };
-      ctx.postMessage(msg);
-    });
+    const result = await synthesizeController(
+      grid,
+      specs,
+      (p) => {
+        const msg: WorkerResponse = {
+          id,
+          type: "progress",
+          iter: p.iter,
+          gamma: p.gamma,
+          bw: p.bw,
+          feasible: p.feasible,
+        };
+        ctx.postMessage(msg);
+      },
+      () => cancelled.has(id),
+    );
     const done: WorkerResponse = { id, type: "done", result };
     ctx.postMessage(done);
   } catch (err) {
@@ -59,5 +78,7 @@ ctx.addEventListener("message", async (ev: MessageEvent<WorkerRequest>) => {
       message: err instanceof Error ? err.message : String(err),
     };
     ctx.postMessage(msg);
+  } finally {
+    cancelled.delete(req.id);
   }
 });

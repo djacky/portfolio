@@ -66,7 +66,7 @@ const TABS: {
   {
     key: "aws",
     hash: "demo-aws",
-    label: "Live Match Backend",
+    label: "Live Backend Infra",
     sub: "FastAPI · Lambda · Postgres",
     icon: Network,
     tint: "#fb923c",

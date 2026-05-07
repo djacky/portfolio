@@ -720,6 +720,7 @@ export async function synthesizeController(
   grid: FrequencyGrid,
   specs: SynthesisSpecs,
   onProgress?: (p: SynthesisProgress) => void,
+  shouldStop?: () => boolean,
 ): Promise<SynthesisResult> {
   setControllerOrder(specs.order ?? DEFAULT_ORDER);
   const { Td, Wd } = desiredWeighting(grid.w, specs.desBw, specs.desZeta);
@@ -778,6 +779,13 @@ export async function synthesizeController(
       gamma = (gamma + gMin) / 2;
       bisFlags.push(true);
     }
+
+    // Cooperative cancellation. The caller (typically a wall-clock
+    // timeout in the worker) can ask us to bail; if we already have a
+    // feasible iterate we fall through to the post-loop code path and
+    // return that as the result.  If nothing has been feasible yet we
+    // also bail, and the standard infeasible return takes over below.
+    if (shouldStop?.()) break;
   }
 
   // Infeasible if every bisection step failed or residual huge.
