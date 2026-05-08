@@ -131,7 +131,7 @@ export default function Publications() {
             className="mt-2 text-4xl md:text-5xl font-semibold text-gradient"
           />
           <Typewriter
-            text="Selected publications from a decade of control-systems research at EPFL and CERN. Recent ML work — PPO fleet policies at Eaton, transformer matchmaker at Disruptive Labs — lives in production rather than papers."
+            text="Seven selected publications from a decade of control-systems research at EPFL and CERN — full catalog on Google Scholar. Recent ML work — PPO fleet policies at Eaton, transformer matchmaker at Disruptive Labs — lives in production rather than papers."
             as="p"
             speed={18}
             delay={1100}
@@ -143,23 +143,42 @@ export default function Publications() {
         {/* stats strip */}
         <div className="grid grid-cols-4 gap-4 mb-10">
           {[
-            { label: "Publications", value: stats.papers },
+            { label: "Publications", value: stats.papers, href: SCHOLAR_URL },
             { label: "Citations", value: stats.citations.toLocaleString("en-US") },
             { label: "h-index", value: stats.hIndex },
             { label: "i10-index", value: stats.i10Index },
-          ].map((s) => (
-            <div
-              key={s.label}
-              className="glass rounded-xl px-5 py-4 text-center"
-            >
-              <div className="text-2xl md:text-3xl font-display font-semibold text-white">
-                {s.value}
+          ].map((s) => {
+            const content = (
+              <>
+                <div className="text-2xl md:text-3xl font-display font-semibold text-white">
+                  {s.value}
+                </div>
+                <div className="mt-1 flex items-center justify-center gap-1 text-[11px] font-mono uppercase tracking-[0.18em] text-gray-500">
+                  {s.label}
+                  {s.href && <ExternalLink className="w-3 h-3" />}
+                </div>
+              </>
+            );
+            return s.href ? (
+              <a
+                key={s.label}
+                href={s.href}
+                target="_blank"
+                rel="noopener noreferrer"
+                title="View all publications on Google Scholar"
+                className="glass rounded-xl px-5 py-4 text-center hover:border-accent/40 hover:shadow-glow transition-all"
+              >
+                {content}
+              </a>
+            ) : (
+              <div
+                key={s.label}
+                className="glass rounded-xl px-5 py-4 text-center"
+              >
+                {content}
               </div>
-              <div className="mt-1 text-[11px] font-mono uppercase tracking-[0.18em] text-gray-500">
-                {s.label}
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
 
         {/* paper list */}

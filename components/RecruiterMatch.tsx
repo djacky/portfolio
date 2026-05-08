@@ -116,7 +116,7 @@ Nice to have:
   },
 ];
 
-const MODEL_LABEL = "Claude Sonnet 4.6";
+const MODEL_LABEL = "Claude Sonnet";
 
 /* ---------------- color & status meta ---------------- */
 
